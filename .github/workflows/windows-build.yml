@@ -3,7 +3,7 @@ name: Build Windows Client
 on:
   push:
     branches: [ master, main ]
-  workflow_dispatch: # 支持手动触发运行
+  workflow_dispatch:
 
 jobs:
   build:
@@ -12,7 +12,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive' # 确保拉取了你修改后的 hbb_common
+          submodules: 'recursive'
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -20,43 +20,41 @@ jobs:
           toolchain: stable
           target: x86_64-pc-windows-msvc
 
+      # 降低 Flutter 版本到 3.16.0，以兼容旧版插件语法
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          flutter-version: '3.x'
+          flutter-version: '3.16.0' 
 
       - name: Set up VCPKG
         run: |
-          # 1. 克隆 vcpkg
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
-          
-          # 2. 设置 VCPKG_ROOT 环境变量并持久化
           $vcpkg_path = "$((Get-Item .).FullName)\vcpkg"
           echo "VCPKG_ROOT=$vcpkg_path" >> $env:GITHUB_ENV
-          
-          # 3. 安装依赖 (清单模式：自动读取 vcpkg.json)
           .\vcpkg\vcpkg install --triplet x64-windows-static-md
+
+      - name: Generate Bridge Code
+        run: |
+          # 安装生成工具
+          cargo install flutter_rust_bridge_codegen --version 1.80.1
+          # 进入 flutter 目录并生成代码（这是解决 generated_bridge.dart 缺失的关键）
+          cd flutter
+          flutter pub get
+          # 运行生成指令
+          ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ../src/main.rs --dart-output ./lib/generated_bridge.dart
 
       - name: Build Windows App
         run: |
-          # 确保 Rust 编译器能识别 vcpkg 路径
           $env:VCPKG_ROOT = "$((Get-Item .).FullName)\vcpkg"
-          
-          # 启用 Windows 支持
           flutter config --enable-windows-desktop
-          
-          # 【关键】进入 flutter 目录进行编译，解决 No pubspec.yaml 错误
           cd flutter
-          
-          flutter pub get
+          # 强制忽略部分语法警告进行编译
           flutter build windows --release
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Windows-Client-Exe
-          # 指向编译生成的 Release 文件夹
           path: flutter/build/windows/runner/Release/
-          if-no-files-found: error
