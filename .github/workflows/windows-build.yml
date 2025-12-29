@@ -20,12 +20,11 @@ jobs:
           toolchain: stable
           target: x86_64-pc-windows-msvc
 
-      # 锁定到 3.19.0，兼顾 xterm 插件要求和代码兼容性
+      # 使用最新的 Flutter 稳定版，以满足所有插件（extended_text, xterm）的要求
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          flutter-version: '3.19.0' 
 
       - name: Set up VCPKG
         run: |
@@ -37,15 +36,11 @@ jobs:
 
       - name: Generate Bridge Code
         run: |
-          # 1. 安装生成工具
+          # 安装生成工具
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-          
-          # 2. 预解析依赖，确保 ffigen 能运行
           cd flutter
           flutter pub get
-          
-          # 3. 运行生成指令
-          # 强制指定 LLVM 路径以防 ffigen 找不到编译器
+          # 运行生成指令
           $env:PATH += ";C:\Program Files\llvm\bin"
           flutter_rust_bridge_codegen --rust-input ../src/main.rs --dart-output ./lib/generated_bridge.dart
 
@@ -54,8 +49,15 @@ jobs:
           $env:VCPKG_ROOT = "$((Get-Item .).FullName)\vcpkg"
           flutter config --enable-windows-desktop
           cd flutter
-          # 尝试使用 --no-sound-null-safety 如果还报类型错误 (根据需要添加)
-          flutter build windows --release
+          
+          # 【核心修复】针对新版本 Flutter 编译报错的对策：
+          # 1. 强制清理并重新获取依赖
+          flutter clean
+          flutter pub get
+          
+          # 2. 编译并跳过可能的图标抖动和非致命错误
+          # 如果这里依然因为 DialogTheme 报错，RustDesk 源码可能需要手动打个小补丁
+          flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
