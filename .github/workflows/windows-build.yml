@@ -1,0 +1,51 @@
+name: Build Windows Client
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch: # 允许手动点击运行
+
+jobs:
+  build:
+    runs-on: windows-2022 # 使用最新的 Windows 环境
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive' # 自动拉取你修改后的 hbb_common
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+
+      - name: Install Flutter # 如果你的客户端是 Flutter 开发的
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.x'
+
+      - name: Set up VCPKG
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git
+          .\vcpkg\bootstrap-vcpkg.bat
+          echo "VCPKG_ROOT=$((Get-Item .).FullName)\vcpkg" >> $env:GITHUB_ENV
+          # 预安装必要依赖，避免之前的 400 错误
+          .\vcpkg\vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static
+
+      - name: Build Windows App
+        run: |
+          # 启用 Windows 桌面支持
+          flutter config --enable-windows-desktop
+          # 执行 Release 编译
+          flutter build windows --release
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-Client-Exe
+          # 确保路径匹配编译后的输出目录
+          path: build/windows/runner/Release/
+          if-no-files-found: error
