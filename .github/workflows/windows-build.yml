@@ -3,7 +3,7 @@ name: Build Windows Client
 on:
   push:
     branches: [ master, main ]
-  workflow_dispatch:
+  workflow_dispatch: # 支持手动触发运行
 
 jobs:
   build:
@@ -12,7 +12,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: 'recursive' # 确保拉取了你修改后的 hbb_common
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -28,27 +28,35 @@ jobs:
 
       - name: Set up VCPKG
         run: |
-          # 克隆并初始化 vcpkg
+          # 1. 克隆 vcpkg
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
           
-          # 将 VCPKG 路径写入环境变量，供后续 Rust 编译使用
+          # 2. 设置 VCPKG_ROOT 环境变量并持久化
           $vcpkg_path = "$((Get-Item .).FullName)\vcpkg"
           echo "VCPKG_ROOT=$vcpkg_path" >> $env:GITHUB_ENV
           
-          # 清单模式下直接执行 install，不加具体包名
-          # 指定静态链接 triplet 确保生成的 exe 不需要带一堆 dll
+          # 3. 安装依赖 (清单模式：自动读取 vcpkg.json)
           .\vcpkg\vcpkg install --triplet x64-windows-static-md
 
       - name: Build Windows App
         run: |
-          # 启用 Windows 桌面支持并编译
+          # 确保 Rust 编译器能识别 vcpkg 路径
+          $env:VCPKG_ROOT = "$((Get-Item .).FullName)\vcpkg"
+          
+          # 启用 Windows 支持
           flutter config --enable-windows-desktop
+          
+          # 【关键】进入 flutter 目录进行编译，解决 No pubspec.yaml 错误
+          cd flutter
+          
+          flutter pub get
           flutter build windows --release
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Windows-Client-Exe
-          # 自动匹配 Flutter 编译出的 Release 目录
-          path: build/windows/runner/Release/
+          # 指向编译生成的 Release 文件夹
+          path: flutter/build/windows/runner/Release/
+          if-no-files-found: error
