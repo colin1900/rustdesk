@@ -20,12 +20,12 @@ jobs:
           toolchain: stable
           target: x86_64-pc-windows-msvc
 
-      # 降低 Flutter 版本到 3.16.0，以兼容旧版插件语法
+      # 锁定到 3.19.0，兼顾 xterm 插件要求和代码兼容性
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          flutter-version: '3.16.0' 
+          flutter-version: '3.19.0' 
 
       - name: Set up VCPKG
         run: |
@@ -37,20 +37,24 @@ jobs:
 
       - name: Generate Bridge Code
         run: |
-          # 安装生成工具
+          # 1. 安装生成工具
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-          # 进入 flutter 目录并生成代码（这是解决 generated_bridge.dart 缺失的关键）
+          
+          # 2. 预解析依赖，确保 ffigen 能运行
           cd flutter
           flutter pub get
-          # 运行生成指令
-          ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ../src/main.rs --dart-output ./lib/generated_bridge.dart
+          
+          # 3. 运行生成指令
+          # 强制指定 LLVM 路径以防 ffigen 找不到编译器
+          $env:PATH += ";C:\Program Files\llvm\bin"
+          flutter_rust_bridge_codegen --rust-input ../src/main.rs --dart-output ./lib/generated_bridge.dart
 
       - name: Build Windows App
         run: |
           $env:VCPKG_ROOT = "$((Get-Item .).FullName)\vcpkg"
           flutter config --enable-windows-desktop
           cd flutter
-          # 强制忽略部分语法警告进行编译
+          # 尝试使用 --no-sound-null-safety 如果还报类型错误 (根据需要添加)
           flutter build windows --release
 
       - name: Upload Artifact
