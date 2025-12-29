@@ -1,51 +1,31 @@
-name: Build Windows Client
-
-on:
-  push:
-    branches: [ master, main ]
-  workflow_dispatch: # 允许手动点击运行
-
-jobs:
-  build:
-    runs-on: windows-2022 # 使用最新的 Windows 环境
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive' # 自动拉取你修改后的 hbb_common
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          target: x86_64-pc-windows-msvc
-
-      - name: Install Flutter # 如果你的客户端是 Flutter 开发的
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          flutter-version: '3.x'
-
-      - name: Set up VCPKG
+- name: Set up VCPKG
         run: |
+          # 1. 克隆 vcpkg
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
+          
+          # 2. 设置环境变量（非常重要，Rust 编译时需要根据这个找库）
           echo "VCPKG_ROOT=$((Get-Item .).FullName)\vcpkg" >> $env:GITHUB_ENV
-          # 预安装必要依赖，避免之前的 400 错误
-          .\vcpkg\vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static
-
+          $vcpkg_path = "$((Get-Item .).FullName)\vcpkg"
+          
+          # 3. 执行安装（不带参数，直接读取项目自带的 vcpkg.json）
+          # 使用 --triplet 指定 Windows 64 位静态编译
+          .\vcpkg\vcpkg install --triplet x64-windows-static-md
+          
       - name: Build Windows App
         run: |
-          # 启用 Windows 桌面支持
+          # 确保 Rust 编译器能找到 vcpkg 编译出来的库
+          $env:VCPKG_ROOT = "$((Get-Item .).FullName)\vcpkg"
+          
+          # 启用 Flutter Windows 支持
           flutter config --enable-windows-desktop
-          # 执行 Release 编译
+          
+          # 执行编译
           flutter build windows --release
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Windows-Client-Exe
-          # 确保路径匹配编译后的输出目录
+          name: RustDesk-Windows-Exe
+          # 注意：RustDesk 编译后的产物通常在以下路径，请确认
           path: build/windows/runner/Release/
-          if-no-files-found: error
