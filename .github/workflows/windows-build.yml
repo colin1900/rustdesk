@@ -20,7 +20,6 @@ jobs:
           toolchain: stable
           target: x86_64-pc-windows-msvc
 
-      # 使用最新的 Flutter 稳定版，以满足所有插件（extended_text, xterm）的要求
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -34,15 +33,29 @@ jobs:
           echo "VCPKG_ROOT=$vcpkg_path" >> $env:GITHUB_ENV
           .\vcpkg\vcpkg install --triplet x64-windows-static-md
 
-      - name: Generate Bridge Code
+      - name: Auto Fix and Generate Code
         run: |
-          # 安装生成工具
+          # 1. 安装生成工具 (锁定版本以匹配 RustDesk 常用版本)
           cargo install flutter_rust_bridge_codegen --version 1.80.1
+          
           cd flutter
+          
+          # 2. 自动化修复 Flutter 类型不兼容 (PowerShell 批量替换)
+          Write-Host "Patching incompatible Flutter code..."
+          Get-ChildItem -Recurse -Include *.dart | ForEach-Object {
+              (Get-Content $_.FullName) `
+              -replace 'DialogTheme\(', 'DialogThemeData(' `
+              -replace 'DialogTheme\?', 'DialogThemeData?' `
+              -replace 'TabBarTheme\(', 'TabBarThemeData(' `
+              -replace 'TabBarTheme\?', 'TabBarThemeData?' `
+              | Set-Content $_.FullName
+          }
+
+          # 3. 运行代码生成
           flutter pub get
-          # 运行生成指令
           $env:PATH += ";C:\Program Files\llvm\bin"
-          flutter_rust_bridge_codegen --rust-input ../src/main.rs --dart-output ./lib/generated_bridge.dart
+          # 尝试使用 bridge 模式生成，确保 RustdeskImpl 包含所有方法
+          flutter_rust_bridge_codegen --rust-input ../src/main.rs --dart-output ./lib/generated_bridge.dart --rust-output ../src/bridge_generated.rs
 
       - name: Build Windows App
         run: |
@@ -50,13 +63,11 @@ jobs:
           flutter config --enable-windows-desktop
           cd flutter
           
-          # 【核心修复】针对新版本 Flutter 编译报错的对策：
-          # 1. 强制清理并重新获取依赖
+          # 彻底清理
           flutter clean
           flutter pub get
           
-          # 2. 编译并跳过可能的图标抖动和非致命错误
-          # 如果这里依然因为 DialogTheme 报错，RustDesk 源码可能需要手动打个小补丁
+          # 编译阶段：增加 --no-tree-shake-icons 减少错误
           flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
