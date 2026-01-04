@@ -14,6 +14,10 @@ jobs:
         with:
           submodules: 'recursive'
 
+      # 关键步骤：自动配置 MSVC 编译环境（包括所有头文件路径）
+      - name: Set up MSVC Dev Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -28,40 +32,31 @@ jobs:
       - name: Install LLVM
         run: |
           choco install llvm -y
-          # 必须将 Clang 的 lib 路径传给 bindgen
+          # 将 LLVM 注入环境，供 bindgen 使用
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Setup VCPKG (Force Classic Mode)
+      - name: Setup VCPKG
         shell: powershell
         run: |
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
-          $VcpkgRoot = "$PWD\vcpkg"
           
-          Write-Host "Installing dependencies..."
-          .\vcpkg\vcpkg install ffmpeg libvpx libyuv opus --triplet x64-windows-static --classic --x-wait-for-lock
+          # 安装必要的依赖
+          .\vcpkg\vcpkg install ffmpeg libvpx libyuv opus --triplet x64-windows-static --classic
           
-          $VcpkgInst = "$VcpkgRoot\installed\x64-windows-static"
-          echo "VCPKG_ROOT=$VcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "INCLUDE=$VcpkgInst\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "LIB=$VcpkgInst\lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $VcpkgInst = "$PWD\vcpkg\installed\x64-windows-static"
+          echo "VCPKG_ROOT=$PWD\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # 叠加 vcpkg 路径到系统 INCLUDE/LIB
+          echo "INCLUDE=$VcpkgInst\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "LIB=$VcpkgInst\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Auto Fix and Bridge Generation
+      - name: Build Preparation
         shell: powershell
         run: |
-          # 1. 解决 bindgen 找不到 stdlib.h 的问题
-          # 获取 MSVC 的包含路径
-          $msvcInclude = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC\14.44.35207\include"
-          $sdkInclude = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.22621.0\ucrt"
-          
-          # 将这些路径通过 BINDGEN_EXTRA_CLANG_ARGS 传给 bindgen
-          $clang_args = "-I$msvcInclude -I$sdkInclude"
-          echo "BINDGEN_EXTRA_CLANG_ARGS=$clang_args" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          
-          # 2. 正常后续流程
-          $env:VCPKG_ROOT = "$PWD\vcpkg"
+          # 安装 frb 工具
           cargo install flutter_rust_bridge_codegen --version 1.80.1
 
+          # 修复 Flutter 兼容性
           cd flutter
           Get-ChildItem -Recurse -Include *.dart | ForEach-Object {
               (Get-Content $_.FullName) `
@@ -73,15 +68,16 @@ jobs:
           }
           
           cd ..
+          # 核心修正：手动告诉 bindgen 去哪里找标准的头文件
+          # 使用 msvc-dev-cmd 注入的环境变量拼接参数
+          $clang_args = "-I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:VCToolsInstallDir\include`" -I`"$env:WindowsSdkDir\Include\$env:WindowsSDKVersion\shared`""
+          echo "BINDGEN_EXTRA_CLANG_ARGS=$clang_args" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          
           python build.py --hw --flutter
 
       - name: Build Windows App
         shell: powershell
         run: |
-          # 在执行构建前再次确保环境变量生效
-          $env:VCPKG_ROOT = "$PWD\vcpkg"
-          $env:INCLUDE = "$PWD\vcpkg\installed\x64-windows-static\include"
-          
           cd flutter
           flutter pub get
           flutter build windows --release --no-tree-shake-icons
