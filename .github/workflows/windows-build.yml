@@ -25,53 +25,55 @@ jobs:
         with:
           channel: 'stable'
 
+      - name: Install LLVM (Required for Bridge)
+        run: |
+          choco install llvm -y
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
       - name: Set up VCPKG
         run: |
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
           $vcpkg_path = "$((Get-Item .).FullName)\vcpkg"
           echo "VCPKG_ROOT=$vcpkg_path" >> $env:GITHUB_ENV
+          # 安装 RustDesk 必要的静态库
           .\vcpkg\vcpkg install --triplet x64-windows-static-md
 
-      - name: Auto Fix and Generate Code
+      - name: Auto Fix and Build Preparation
         run: |
-          # 1. 安装生成工具 (锁定版本以匹配 RustDesk 常用版本)
+          # 1. 安装指定版本的桥接生成工具
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-          
+
+          # 2. 修复 Flutter 主题类重命名导致的“变量未初始化”错误
+          # RustDesk 旧版代码中的字段在新的 ThemeData 中可能需要手动映射
           cd flutter
-          
-          # 2. 自动化修复 Flutter 类型不兼容 (PowerShell 批量替换)
-          Write-Host "Patching incompatible Flutter code..."
+          Write-Host "Patching TabBarTheme and DialogTheme..."
           Get-ChildItem -Recurse -Include *.dart | ForEach-Object {
               (Get-Content $_.FullName) `
               -replace 'DialogTheme\(', 'DialogThemeData(' `
-              -replace 'DialogTheme\?', 'DialogThemeData?' `
               -replace 'TabBarTheme\(', 'TabBarThemeData(' `
-              -replace 'TabBarTheme\?', 'TabBarThemeData?' `
               | Set-Content $_.FullName
           }
-
-          # 3. 运行代码生成
-          flutter pub get
-          $env:PATH += ";C:\Program Files\llvm\bin"
-          # 尝试使用 bridge 模式生成，确保 RustdeskImpl 包含所有方法
-          flutter_rust_bridge_codegen --rust-input ../src/main.rs --dart-output ./lib/generated_bridge.dart --rust-output ../src/bridge_generated.rs
+          
+          # 3. 运行官方构建脚本生成桥接代码 (核心步骤)
+          # --hw 表示硬件加速支持, --flutter 会触发 bridge 生成
+          cd ..
+          python build.py --hw --flutter
 
       - name: Build Windows App
         run: |
           $env:VCPKG_ROOT = "$((Get-Item .).FullName)\vcpkg"
-          flutter config --enable-windows-desktop
           cd flutter
           
-          # 彻底清理
-          flutter clean
+          # 刷新依赖，确保生成的 generated_bridge.dart 被加载
           flutter pub get
           
-          # 编译阶段：增加 --no-tree-shake-icons 减少错误
+          # 编译阶段
+          # 使用 --no-tree-shake-icons 避免图标字体编译失败
           flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Windows-Client-Exe
-          path: flutter/build/windows/runner/Release/
+          path: flutter/build/windows/x64/runner/Release/
