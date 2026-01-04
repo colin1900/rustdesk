@@ -30,29 +30,33 @@ jobs:
           choco install llvm -y
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
-      - name: Set up VCPKG and Install Dependencies
+      - name: Set up VCPKG and Dependencies
         run: |
-          # 1. 克隆并初始化 vcpkg
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
           $vcpkg_root = "$((Get-Item .).FullName)\vcpkg"
           echo "VCPKG_ROOT=$vcpkg_root" >> $env:GITHUB_ENV
           
-          # 2. 运行安装。注意：由于存在 vcpkg.json，不能在命令行列出具体包名。
-          # 它会自动安装清单中定义的 ffmpeg, libvpx, libyuv, opus 等所有依赖。
-          .\vcpkg\vcpkg install --triplet x64-windows-static-md
+          # 强制安装项目清单中的所有依赖
+          # 使用 x64-windows-static 保持与 hwcodec 默认搜索路径一致
+          .\vcpkg\vcpkg install --triplet x64-windows-static
+          
+          # 关键点：将安装后的 include 路径写入环境变量，供 MSVC (cl.exe) 使用
+          $include_path = "$vcpkg_root\installed\x64-windows-static\include"
+          echo "INCLUDE=$include_path" >> $env:GITHUB_ENV
+          echo "CPATH=$include_path" >> $env:GITHUB_ENV
 
       - name: Auto Fix and Build Preparation
         run: |
-          # 确保环境变量在当前步骤生效
-          $env:VCPKG_ROOT = "$((Get-Item .).FullName)\vcpkg"
+          $vcpkg_root = "$((Get-Item .).FullName)\vcpkg"
+          $env:VCPKG_ROOT = $vcpkg_root
+          # 将编译路径加入 INCLUDE，防止 C++ 编译器找不到头文件
+          $env:INCLUDE = "$vcpkg_root\installed\x64-windows-static\include"
           
-          # 安装桥接生成工具
           cargo install flutter_rust_bridge_codegen --version 1.80.1
 
-          # 修复 Flutter 3.16+ TabBarThemeData/DialogThemeData 不兼容导致的变量未初始化错误
+          # 修复 Flutter 兼容性
           cd flutter
-          Write-Host "Patching Flutter theme compatibility..."
           Get-ChildItem -Recurse -Include *.dart | ForEach-Object {
               (Get-Content $_.FullName) `
               -replace 'DialogTheme\(', 'DialogThemeData(' `
@@ -62,6 +66,23 @@ jobs:
               | Set-Content $_.FullName
           }
           
-          # 运行官方构建脚本。这步会生成 RustdeskImpl 的所有方法（解决 mainSetLocalOption 等缺失问题）
           cd ..
-          python build.py --hw
+          # 执行生成脚本
+          python build.py --hw --flutter
+
+      - name: Build Windows App
+        run: |
+          $vcpkg_root = "$((Get-Item .).FullName)\vcpkg"
+          $env:VCPKG_ROOT = $vcpkg_root
+          $env:INCLUDE = "$vcpkg_root\installed\x64-windows-static\include"
+          
+          cd flutter
+          flutter pub get
+          # 加上 --no-tree-shake-icons 提高成功率
+          flutter build windows --release --no-tree-shake-icons
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-Client-Exe
+          path: flutter/build/windows/x64/runner/Release/
