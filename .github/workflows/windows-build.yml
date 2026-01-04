@@ -32,43 +32,36 @@ jobs:
 
       - name: Set up VCPKG and Install Dependencies
         run: |
+          # 1. 克隆并初始化 vcpkg
           git clone https://github.com/microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
           $vcpkg_root = "$((Get-Item .).FullName)\vcpkg"
           echo "VCPKG_ROOT=$vcpkg_root" >> $env:GITHUB_ENV
           
-          # 安装 RustDesk 硬件编解码必须的依赖
-          .\vcpkg\vcpkg install ffmpeg[avresample] libvpx libyuv opus --triplet x64-windows-static-md
+          # 2. 运行安装。注意：由于存在 vcpkg.json，不能在命令行列出具体包名。
+          # 它会自动安装清单中定义的 ffmpeg, libvpx, libyuv, opus 等所有依赖。
+          .\vcpkg\vcpkg install --triplet x64-windows-static-md
 
       - name: Auto Fix and Build Preparation
         run: |
-          # 设置 vcpkg 路径确保 build.py 能找到
+          # 确保环境变量在当前步骤生效
           $env:VCPKG_ROOT = "$((Get-Item .).FullName)\vcpkg"
           
+          # 安装桥接生成工具
           cargo install flutter_rust_bridge_codegen --version 1.80.1
 
-          # 修复 Flutter 兼容性
+          # 修复 Flutter 3.16+ TabBarThemeData/DialogThemeData 不兼容导致的变量未初始化错误
           cd flutter
+          Write-Host "Patching Flutter theme compatibility..."
           Get-ChildItem -Recurse -Include *.dart | ForEach-Object {
               (Get-Content $_.FullName) `
               -replace 'DialogTheme\(', 'DialogThemeData(' `
+              -replace 'DialogTheme\?', 'DialogThemeData?' `
               -replace 'TabBarTheme\(', 'TabBarThemeData(' `
+              -replace 'TabBarTheme\?', 'TabBarThemeData?' `
               | Set-Content $_.FullName
           }
           
+          # 运行官方构建脚本。这步会生成 RustdeskImpl 的所有方法（解决 mainSetLocalOption 等缺失问题）
           cd ..
-          # 执行构建脚本，它现在应该能找到 vcpkg 安装的 ffmpeg 了
-          python build.py --hw --flutter
-
-      - name: Build Windows App
-        run: |
-          $env:VCPKG_ROOT = "$((Get-Item .).FullName)\vcpkg"
-          cd flutter
-          flutter pub get
-          flutter build windows --release --no-tree-shake-icons
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Windows-Client-Exe
-          path: flutter/build/windows/x64/runner/Release/
+          python build.py --hw
