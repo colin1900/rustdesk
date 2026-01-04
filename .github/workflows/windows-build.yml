@@ -1,4 +1,4 @@
-name: Build Windows Client
+name: Build Windows Green Client
 
 on:
   push:
@@ -14,6 +14,16 @@ jobs:
         with:
           submodules: 'recursive'
 
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install Python Dependencies
+        run: |
+          pip install -r requirements.txt
+        shell: powershell
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -24,29 +34,26 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+          cache: true
 
-      - name: Install LLVM
+      - name: Install LLVM and Zstandard
         run: |
-          choco install llvm -y
-          # 修正：使用 Out-File 确保环境变量正确写入
+          choco install llvm zstandard -y
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "PATH=${env:PATH};C:\Program Files\LLVM\bin;C:\Program Files\7-Zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        shell: powershell
 
       - name: Download and Setup Prebuilt Libs
         shell: powershell
         run: |
-          # 1. 使用本地全路径
           $RootPath = Get-Location
           $VcpkgPath = Join-Path $RootPath "vcpkg\installed\x64-windows-static"
           New-Item -ItemType Directory -Force -Path "$VcpkgPath\include"
           
-          # 2. 下载 RustDesk 官方预编译依赖 (包含 ffmpeg 头文件)
           curl -L -o desktop_required.zip https://github.com/rustdesk/doc.rustdesk.com/releases/download/console/desktop_required.zip
           Expand-Archive -Path desktop_required.zip -DestinationPath . -Force
-          
-          # 3. 移动文件到构建脚本预期的目录结构
           Copy-Item -Path "desktop_required\*" -Destination "vcpkg\installed\x64-windows-static\" -Recurse -Force
           
-          # 4. 关键：修正环境变量注入方式
           echo "VCPKG_ROOT=$RootPath\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "INCLUDE=$VcpkgPath\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "LIB=$VcpkgPath\lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -54,14 +61,13 @@ jobs:
       - name: Auto Fix and Bridge Generation
         shell: powershell
         run: |
-          # 再次确保环境在当前 context 生效
           $vcpkg_root = "$PWD\vcpkg"
           $env:VCPKG_ROOT = $vcpkg_root
           $env:INCLUDE = "$vcpkg_root\installed\x64-windows-static\include"
           
           cargo install flutter_rust_bridge_codegen --version 1.80.1
 
-          # 修复 Flutter 3.16+ 兼容性
+          # 修复 Flutter 兼容性
           cd flutter
           Get-ChildItem -Recurse -Include *.dart | ForEach-Object {
               (Get-Content $_.FullName) `
@@ -73,8 +79,13 @@ jobs:
           }
           
           cd ..
-          # 使用 python 运行官方脚本，它会处理复杂的 bridge 参数
-          python build.py --hw --flutter
+          # 确保 build.py 存在
+          if (Test-Path "build.py") {
+              python build.py --hw --flutter
+          } else {
+              Write-Warning "build.py not found, using fallback bridge generation"
+              flutter_rust_bridge_codegen --rust-input ./rust/src/main.rs --dart-output ./flutter/lib/generated_bridge.dart
+          }
 
       - name: Build Windows App
         shell: powershell
@@ -84,10 +95,40 @@ jobs:
           
           cd flutter
           flutter pub get
+          flutter clean
           flutter build windows --release --no-tree-shake-icons
 
-      - name: Upload Artifact
+      - name: Package Green Client
+        shell: powershell
+        run: |
+          $buildDir = "flutter\build\windows\x64\runner\Release"
+          $packageDir = "rustdesk-green"
+          
+          # 创建绿色客户端目录
+          New-Item -ItemType Directory -Force -Path $packageDir
+          
+          # 复制主程序文件
+          Copy-Item "$buildDir\*" -Destination $packageDir -Recurse -Force
+          
+          # 复制必要的DLL文件
+          $system32 = "C:\Windows\System32"
+          $requiredDlls = @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+          foreach ($dll in $requiredDlls) {
+              if (Test-Path "$system32\$dll") {
+                  Copy-Item "$system32\$dll" -Destination $packageDir -Force
+              }
+          }
+          
+          # 创建版本文件
+          $version = (Get-Date).ToString("yyyyMMdd-HHmm")
+          "RustDesk Green Client - Built: $version" | Out-File "$packageDir\version.txt"
+          
+          # 打包成zip
+          $zipFile = "rustdesk-green-$version.zip"
+          7z a $zipFile $packageDir\*
+
+      - name: Upload Green Client Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Windows-Client-Exe
-          path: flutter/build/windows/x64/runner/Release/
+          name: Windows-Green-Client
+          path: rustdesk-green-*.zip
