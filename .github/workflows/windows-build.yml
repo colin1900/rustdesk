@@ -30,36 +30,30 @@ jobs:
           choco install llvm -y
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Download and Setup Prebuilt Libs
+      - name: Setup VCPKG (Classic Mode Force)
         shell: powershell
         run: |
-          $RootPath = Get-Location
-          $VcpkgPath = Join-Path $RootPath "vcpkg\installed\x64-windows-static"
-          # 创建目标目录
-          if (!(Test-Path "$VcpkgPath\include")) { New-Item -ItemType Directory -Force -Path "$VcpkgPath\include" }
+          # 1. 克隆 vcpkg
+          git clone https://github.com/microsoft/vcpkg.git
+          .\vcpkg\bootstrap-vcpkg.bat
+          $VcpkgRoot = "$PWD\vcpkg"
           
-          # 使用 PowerShell 原生下载方式
-          Write-Host "Downloading prebuilt libs..."
-          Invoke-WebRequest -Uri "https://github.com/rustdesk/doc.rustdesk.com/releases/download/console/desktop_required.zip" -OutFile "desktop_required.zip"
+          # 2. 强制使用经典模式安装依赖 (绕过 vcpkg.json 导致的清单模式错误)
+          # 我们只需要 ffmpeg 和相关的音视频库
+          Write-Host "Installing dependencies via VCPKG Classic Mode..."
+          .\vcpkg\vcpkg install ffmpeg libvpx libyuv opus --triplet x64-windows-static --x-wait-for-lock
           
-          Write-Host "Extracting files..."
-          Expand-Archive -Path desktop_required.zip -DestinationPath "temp_libs" -Force
-          
-          # 移动文件到构建脚本预期的目录结构 (假设压缩包内有一层目录)
-          # 注意：通过 Get-ChildItem 确保我们能拿到解压后的实际内容
-          Copy-Item -Path "temp_libs\desktop_required\*" -Destination "$VcpkgPath\" -Recurse -Force
-          
-          # 写入环境变量
-          echo "VCPKG_ROOT=$RootPath\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "INCLUDE=$VcpkgPath\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "LIB=$VcpkgPath\lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # 3. 设置路径
+          $VcpkgInst = "$VcpkgRoot\installed\x64-windows-static"
+          echo "VCPKG_ROOT=$VcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "INCLUDE=$VcpkgInst\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "LIB=$VcpkgInst\lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Auto Fix and Bridge Generation
         shell: powershell
         run: |
-          $vcpkg_root = "$PWD\vcpkg"
-          $env:VCPKG_ROOT = $vcpkg_root
-          $env:INCLUDE = "$vcpkg_root\installed\x64-windows-static\include"
+          $env:VCPKG_ROOT = "$PWD\vcpkg"
+          $env:INCLUDE = "$PWD\vcpkg\installed\x64-windows-static\include"
           
           cargo install flutter_rust_bridge_codegen --version 1.80.1
 
@@ -75,7 +69,6 @@ jobs:
           }
           
           cd ..
-          # 使用 python 运行官方脚本处理桥接生成
           python build.py --hw --flutter
 
       - name: Build Windows App
