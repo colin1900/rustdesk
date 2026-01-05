@@ -33,42 +33,29 @@ jobs:
           choco install llvm nasm ninja -y
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Setup Dependencies via System VCPKG
+      - name: Setup Dependencies
         shell: powershell
         run: |
-          # 1. 使用系统预装的 vcpkg 路径
+          # 使用系统预装 vcpkg
           $VcpkgExe = "C:\vcpkg\vcpkg.exe"
-          $VcpkgRoot = "C:\vcpkg"
-          
-          # 2. 核心：强制安装 RustDesk 编译所需的最小依赖集
-          # 加上 --binarysource=clear 确保它尝试从源码编译或本地缓存读取，不依赖失效的镜像
-          Write-Host "Installing dependencies using system vcpkg..."
           & $VcpkgExe install ffmpeg[avcodec,avformat,swresample,swscale] libvpx libyuv opus aom --triplet x64-windows-static --classic
           
-          # 3. 提取路径
-          $VcpkgInst = "$VcpkgRoot\installed\x64-windows-static"
-          
-          # 4. 解决 libmfx (Intel) 依赖
-          # 如果 vcpkg 难以搞定 intel-mediasdk，我们通过跳过它或手动定义来避开
-          # RustDesk 在没有 libmfx 时也可以编译成功，只是失去 Intel 硬件加速
-          
-          # 5. 注入环境变量
-          echo "VCPKG_ROOT=$VcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
+          echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "INCLUDE=$VcpkgInst\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "LIB=$VcpkgInst\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build Preparation
+      - name: FRB Codegen and Build
         shell: powershell
         run: |
-          $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
-          
-          # 配置 bindgen 参数，加入系统 SDK 和 VCPKG 路径
-          $clang_args = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:VCToolsInstallDir\include`""
-          echo "BINDGEN_EXTRA_CLANG_ARGS=$clang_args" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
+          # 1. 安装指定版本的 FRB 生成工具
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-
-          # 修复 Flutter 兼容性
+          
+          # 2. 手动运行 FRB 生成（RustDesk 核心步骤）
+          # 这会生成 src/bridge_generated.rs
+          flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
+          
+          # 3. 修复 Flutter UI 兼容性 (针对 Flutter 3.16+)
           if (Test-Path "flutter") {
               cd flutter
               Get-ChildItem -Recurse -Include *.dart | ForEach-Object {
@@ -81,8 +68,12 @@ jobs:
               }
               cd ..
           }
+
+          # 4. 设置 Clang 参数供 bindgen 使用
+          $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
+          $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:VCToolsInstallDir\include`""
           
-          # 运行编译脚本
+          # 5. 执行官方构建脚本 (跳过硬件加速以提高成功率)
           python build.py --flutter
 
       - name: Build Windows App
@@ -90,10 +81,12 @@ jobs:
         run: |
           cd flutter
           flutter pub get
+          # 确保 flutter 端也拿到了生成的 dart 代码
           flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: RustDesk-Windows-x64
-          path: flutter/build/windows/x64/runner/Release/
+          path: |
+             flutter/build/windows/x64/runner/Release/
