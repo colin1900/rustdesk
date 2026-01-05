@@ -36,10 +36,8 @@ jobs:
       - name: Setup Dependencies
         shell: powershell
         run: |
-          # 使用系统预装 vcpkg
           $VcpkgExe = "C:\vcpkg\vcpkg.exe"
           & $VcpkgExe install ffmpeg[avcodec,avformat,swresample,swscale] libvpx libyuv opus aom --triplet x64-windows-static --classic
-          
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
           echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "INCLUDE=$VcpkgInst\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -48,16 +46,13 @@ jobs:
       - name: FRB Codegen and Build
         shell: powershell
         run: |
-          # 1. 安装指定版本的 FRB 生成工具
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-          
-          # 2. 手动运行 FRB 生成（RustDesk 核心步骤）
-          # 这会生成 src/bridge_generated.rs
           flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
           
-          # 3. 修复 Flutter UI 兼容性 (针对 Flutter 3.16+)
+          # --- 核心 UI 修复脚本 ---
           if (Test-Path "flutter") {
               cd flutter
+              # 1. 修复通用 Theme 命名
               Get-ChildItem -Recurse -Include *.dart | ForEach-Object {
                   (Get-Content $_.FullName) `
                   -replace 'DialogTheme\(', 'DialogThemeData(' `
@@ -66,27 +61,34 @@ jobs:
                   -replace 'TabBarTheme\?', 'TabBarThemeData?' `
                   | Set-Content $_.FullName
               }
+              # 2. 专门修复 tabbar_widget.dart 中的语法错误
+              $tabbarFile = "lib/desktop/widgets/tabbar_widget.dart"
+              if (Test-Path $tabbarFile) {
+                  $content = Get-Content $tabbarFile
+                  # 移除导致错误的 const 构造函数和方法声明
+                  $content = $content -replace 'const TabbarTheme', 'TabbarTheme'
+                  $content = $content -replace 'const TabBarThemeData', 'TabBarThemeData'
+                  $content | Set-Content $tabbarFile
+              }
               cd ..
           }
 
-          # 4. 设置 Clang 参数供 bindgen 使用
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:VCToolsInstallDir\include`""
-          
-          # 5. 执行官方构建脚本 (跳过硬件加速以提高成功率)
           python build.py --flutter
 
       - name: Build Windows App
         shell: powershell
         run: |
           cd flutter
+          # 尝试修复依赖冲突并强制更新 extended_text
+          flutter pub upgrade extended_text
           flutter pub get
-          # 确保 flutter 端也拿到了生成的 dart 代码
+          # 最终编译
           flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: RustDesk-Windows-x64
-          path: |
-             flutter/build/windows/x64/runner/Release/
+          path: flutter/build/windows/x64/runner/Release/
