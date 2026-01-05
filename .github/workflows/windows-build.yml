@@ -23,10 +23,10 @@ jobs:
           toolchain: stable
           target: x86_64-pc-windows-msvc
 
-      - name: Install Flutter
+      - name: Install Flutter (Switch to Stable 3.13.0)
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          flutter-version: '3.13.0' # 强制使用 RustDesk 兼容性最好的版本
 
       - name: Install Build Tools
         run: |
@@ -49,27 +49,12 @@ jobs:
           cargo install flutter_rust_bridge_codegen --version 1.80.1
           flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
           
-          # --- 核心 UI 修复脚本 ---
+          # 针对 Flutter 3.13 的精准修复
           if (Test-Path "flutter") {
               cd flutter
-              # 1. 修复通用 Theme 命名
-              Get-ChildItem -Recurse -Include *.dart | ForEach-Object {
-                  (Get-Content $_.FullName) `
-                  -replace 'DialogTheme\(', 'DialogThemeData(' `
-                  -replace 'DialogTheme\?', 'DialogThemeData?' `
-                  -replace 'TabBarTheme\(', 'TabBarThemeData(' `
-                  -replace 'TabBarTheme\?', 'TabBarThemeData?' `
-                  | Set-Content $_.FullName
-              }
-              # 2. 专门修复 tabbar_widget.dart 中的语法错误
-              $tabbarFile = "lib/desktop/widgets/tabbar_widget.dart"
-              if (Test-Path $tabbarFile) {
-                  $content = Get-Content $tabbarFile
-                  # 移除导致错误的 const 构造函数和方法声明
-                  $content = $content -replace 'const TabbarTheme', 'TabbarTheme'
-                  $content = $content -replace 'const TabBarThemeData', 'TabBarThemeData'
-                  $content | Set-Content $tabbarFile
-              }
+              # 暴力解决 TabbarTheme 报错：直接移除相关类的定义（如果它只是自定义 UI）
+              # 或者尝试最简单的替换
+              (Get-Content lib/desktop/widgets/tabbar_widget.dart) -replace 'const TabbarTheme', 'TabbarTheme' | Set-Content lib/desktop/widgets/tabbar_widget.dart
               cd ..
           }
 
@@ -81,14 +66,13 @@ jobs:
         shell: powershell
         run: |
           cd flutter
-          # 尝试修复依赖冲突并强制更新 extended_text
-          flutter pub upgrade extended_text
+          # 强制锁定导致报错的 extended_text 版本
+          flutter pub add extended_text:13.0.0
           flutter pub get
-          # 最终编译
           flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Windows-x64
+          name: RustDesk-Windows-v3.13-Build
           path: flutter/build/windows/x64/runner/Release/
