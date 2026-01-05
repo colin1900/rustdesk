@@ -23,10 +23,10 @@ jobs:
           toolchain: stable
           target: x86_64-pc-windows-msvc
 
-      - name: Install Flutter
+      - name: Install Flutter (Switch to 3.24.0)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.19.0' # 满足 xterm 4.0.0 的最低要求
+          flutter-version: '3.24.0' # 核心修复：提供 Dart 3.5+ 支持
 
       - name: Install Build Tools
         run: |
@@ -43,51 +43,53 @@ jobs:
           echo "INCLUDE=$VcpkgInst\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "LIB=$VcpkgInst\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Fix UI Source Code (Surgical Repair)
-        shell: powershell
-        run: |
-          # 修复 TabbarTheme 结构冲突
-          $tabbarFile = "flutter/lib/desktop/widgets/tabbar_widget.dart"
-          if (Test-Path $tabbarFile) {
-              Write-Host "Fixing tabbar_widget.dart..."
-              $content = Get-Content $tabbarFile
-              # 移除 const 关键字
-              $content = $content -replace 'const TabbarTheme', 'TabbarTheme'
-              # 补全缺失的 debugFillProperties 实现 (Flutter 3.19+ 要求)
-              if ($content -notlike "*debugFillProperties*") {
-                  $content = $content -replace '}\s*$', "`n  @override`n  void debugFillProperties(DiagnosticPropertiesBuilder properties) {`n    super.debugFillProperties(properties);`n  }`n}"
-              }
-              $content | Set-Content $tabbarFile
-          }
-
-          # 修复通用 Theme 命名冲突
-          Get-ChildItem -Path "flutter/lib" -Recurse -Include *.dart | ForEach-Object {
-              $c = Get-Content $_.FullName
-              $c = $c -replace 'DialogTheme\(', 'DialogThemeData('
-              $c = $c -replace 'DialogTheme\?', 'DialogThemeData?'
-              $c = $c -replace 'TabBarTheme\(', 'TabBarThemeData('
-              $c = $c -replace 'TabBarTheme\?', 'TabBarThemeData?'
-              $c | Set-Content $_.FullName
-          }
-
       - name: FRB Codegen
         shell: powershell
         run: |
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-          # 生成桥接文件
+          # 预先清理并生成
+          if (Test-Path "src/bridge_generated.rs") { Remove-Item "src/bridge_generated.rs" }
           flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart --skip-deps-check
           
-          # 注入 DartHandle 引用以修复 Dart_Handle 报错
+          # 注入 DartHandle 引用
           $bridgeFile = "src/bridge_generated.rs"
           $bridgeContent = Get-Content $bridgeFile
           "use flutter_rust_bridge::support::DartHandle;" + $bridgeContent | Set-Content $bridgeFile
+
+      - name: Fix UI Code (For Flutter 3.24 Compatibility)
+        shell: powershell
+        run: |
+          cd flutter
+          # 1. 强制降级/覆盖容易出错的依赖
+          flutter pub add extended_text:13.0.0
+          
+          # 2. 自动化代码修复：修复 TabbarTheme 报错
+          $tabbarFile = "lib/desktop/widgets/tabbar_widget.dart"
+          if (Test-Path $tabbarFile) {
+              $content = Get-Content $tabbarFile
+              # 移除 const
+              $content = $content -replace 'const TabbarTheme', 'TabbarTheme'
+              # 修复构造函数
+              $content = $content -replace 'TabbarTheme\(', 'TabbarTheme({required this.selectedTabIconColor, required this.unSelectedTabIconColor, required this.selectedTextColor, required this.unSelectedTextColor, required this.selectedIconColor, required this.unSelectedIconColor, required this.dividerColor, required this.hoverColor, required this.closeHoverColor, required this.selectedTabBackgroundColor}) : super(); //'
+              $content | Set-Content $tabbarFile
+          }
+
+          # 3. 修复全量主题命名
+          Get-ChildItem -Recurse -Include *.dart | ForEach-Object {
+              (Get-Content $_.FullName) `
+              -replace 'DialogTheme\(', 'DialogThemeData(' `
+              -replace 'DialogTheme\?', 'DialogThemeData?' `
+              -replace 'TabBarTheme\(', 'TabBarThemeData(' `
+              -replace 'TabBarTheme\?', 'TabBarThemeData?' `
+              | Set-Content $_.FullName
+          }
+          cd ..
 
       - name: Build Preparation & Cargo
         shell: powershell
         run: |
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:VCToolsInstallDir\include`""
-          # 运行构建脚本
           python build.py --flutter
 
       - name: Build Windows App
@@ -100,5 +102,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Windows-v3.19-Build
+          name: RustDesk-Windows-v3.24-Build
           path: flutter/build/windows/x64/runner/Release/
