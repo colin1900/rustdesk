@@ -48,41 +48,37 @@ jobs:
           cd flutter
           flutter pub get
 
-      - name: Manual FRB Codegen (Critical Step)
+      - name: Manual FRB Codegen (Parameter Fixed)
         shell: powershell
         run: |
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-          # 强制生成到 src 目录，解决 mod bridge_generated 找不到的问题
+          # 修正参数名：--dart-decl-output
           flutter_rust_bridge_codegen `
             --rust-input src/flutter_ffi.rs `
             --rust-output src/bridge_generated.rs `
             --dart-output flutter/lib/generated_bridge.dart `
-            --dart-decl-output-path flutter/lib/generated_bridge.freezed.dart `
-            --skip-deps-check `
-            --wasm
+            --dart-decl-output flutter/lib/generated_bridge.freezed.dart `
+            --skip-deps-check
           
-          # 验证文件是否存在
           if (!(Test-Path "src/bridge_generated.rs")) { throw "FRB failed to generate bridge_generated.rs" }
 
       - name: Surgical UI Fixes
         shell: powershell
         run: |
-          # 修复 Flutter 3.24+ 兼容性
           $tabbarFile = "flutter/lib/desktop/widgets/tabbar_widget.dart"
           if (Test-Path $tabbarFile) {
               (Get-Content $tabbarFile) -replace 'const TabbarTheme', 'TabbarTheme' | Set-Content $tabbarFile
           }
-          # 批量替换 Theme 类名
           Get-ChildItem -Path "flutter/lib" -Recurse -Include *.dart | ForEach-Object {
               (Get-Content $_.FullName) -replace 'DialogTheme\(', 'DialogThemeData(' -replace 'TabBarTheme\(', 'TabBarThemeData(' | Set-Content $_.FullName
           }
 
-      - name: Compile Rust Desk
+      - name: Compile Rust & Flutter
         shell: powershell
         run: |
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:VCToolsInstallDir\include`""
-          # 运行官方构建，它会自动识别并编译刚才生成的 bridge_generated.rs
+          # 确保 build.py 能够看到生成的 bridge 文件
           python build.py --flutter
 
       - name: Final Flutter Build
@@ -93,5 +89,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Windows-v3.24-Clean
+          name: RustDesk-Windows-v3.24-Final-Build
           path: flutter/build/windows/x64/runner/Release/
