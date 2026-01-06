@@ -62,59 +62,25 @@ jobs:
             --dart-decl-output flutter/lib/generated_bridge.freezed.dart `
             --skip-deps-check
           cd flutter
-          # 必须生成 .freezed.dart 文件，解决 EventToUI 找不到的问题
           flutter pub run build_runner build --delete-conflicting-outputs
 
       - name: Precision Dart Fixes
         shell: powershell
         run: |
-          # 1. 完全覆盖损坏的 TabbarTheme
           $tabbarPath = "flutter/lib/desktop/widgets/tabbar_widget.dart"
-          $tabbarStub = @"
-import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
+          # 使用简单的行替换，避免多行字符串缩进错误
+          $stub = "import 'package:flutter/material.dart';`nimport 'package:flutter/foundation.dart';`nclass TabbarTheme extends ThemeExtension<TabbarTheme> {`n"
+          $stub += "  final Color selectedTabIconColor, unSelectedTabIconColor, selectedTextColor, unSelectedTextColor, selectedIconColor, unSelectedIconColor, dividerColor, hoverColor, closeHoverColor, selectedTabBackgroundColor;`n"
+          $stub += "  TabbarTheme({this.selectedTabIconColor=Colors.blue, this.unSelectedTabIconColor=Colors.grey, this.selectedTextColor=Colors.black, this.unSelectedTextColor=Colors.black54, this.selectedIconColor=Colors.blue, this.unSelectedIconColor=Colors.grey, this.dividerColor=Colors.transparent, this.hoverColor=Colors.white12, this.closeHoverColor=Colors.red, this.selectedTabBackgroundColor=Colors.white});`n"
+          $stub += "  @override TabbarTheme copyWith() => this;`n  @override TabbarTheme lerp(ThemeExtension<TabbarTheme>? other, double t) => this;`n}"
+          Set-Content -Path $tabbarPath -Value $stub
 
-class TabbarTheme extends ThemeExtension<TabbarTheme> {
-  final Color selectedTabIconColor;
-  final Color unSelectedTabIconColor;
-  final Color selectedTextColor;
-  final Color unSelectedTextColor;
-  final Color selectedIconColor;
-  final Color unSelectedIconColor;
-  final Color dividerColor;
-  final Color hoverColor;
-  final Color closeHoverColor;
-  final Color selectedTabBackgroundColor;
-
-  TabbarTheme({
-    this.selectedTabIconColor = Colors.blue,
-    this.unSelectedTabIconColor = Colors.grey,
-    this.selectedTextColor = Colors.black,
-    this.unSelectedTextColor = Colors.black54,
-    this.selectedIconColor = Colors.blue,
-    this.unSelectedIconColor = Colors.grey,
-    this.dividerColor = Colors.transparent,
-    this.hoverColor = Colors.white12,
-    this.closeHoverColor = Colors.red,
-    this.selectedTabBackgroundColor = Colors.white,
-  });
-
-  @override
-  TabbarTheme copyWith() => this;
-  @override
-  TabbarTheme lerp(ThemeExtension<TabbarTheme>? other, double t) => this;
-}
-"@
-          $tabbarStub | Set-Content $tabbarPath
-
-          # 2. 全局修复 ThemeData 命名冲突
+          # 全局修复命名
           Get-ChildItem -Path "flutter/lib" -Recurse -Include *.dart | ForEach-Object {
-              $text = Get-Content $_.FullName -Raw
-              $text = $text -replace 'DialogTheme\(', 'DialogThemeData('
-              $text = $text -replace 'TabBarTheme\(', 'TabBarThemeData('
-              $text = $text -replace 'DialogTheme\?', 'DialogThemeData?'
-              $text = $text -replace 'TabBarTheme\?', 'TabBarThemeData?'
-              $text | Set-Content $_.FullName
+              $t = Get-Content $_.FullName -Raw
+              $t = $t -replace 'DialogTheme\(', 'DialogThemeData(' -replace 'TabBarTheme\(', 'TabBarThemeData('
+              $t = $t -replace 'DialogTheme\?', 'DialogThemeData?' -replace 'TabBarTheme\?', 'TabBarThemeData?'
+              Set-Content $_.FullName $t
           }
 
       - name: Final Compilation
@@ -122,7 +88,6 @@ class TabbarTheme extends ThemeExtension<TabbarTheme> {
         run: |
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\shared`" -I`"$env:VCToolsInstallDir\include`""
-          # 运行编译脚本
           python build.py --flutter
           cd flutter
           flutter build windows --release --no-tree-shake-icons
