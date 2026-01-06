@@ -1,78 +1,85 @@
-- name: Hardcode Fix UI Definitions
+name: Build-Windows-Client
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+
+      - name: Build Tools
+        run: |
+          choco install llvm nasm ninja -y
+          pip install requests
+
+      - name: VCPKG Setup
         shell: powershell
         run: |
-          $tabbarPath = "flutter/lib/desktop/widgets/tabbar_widget.dart"
+          $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
+          & C:\vcpkg\vcpkg.exe install ffmpeg[avcodec,avformat,swresample,swscale] libvpx libyuv opus aom --triplet x64-windows-static --classic
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Flutter Pre-build
+        shell: powershell
+        run: |
+          cd flutter
+          flutter pub get
+          flutter pub add --dev build_runner freezed_annotation
+          flutter pub add freezed:2.4.7
+
+      - name: Codegen
+        shell: powershell
+        run: |
+          cargo install flutter_rust_bridge_codegen --version 1.80.1
+          flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart --dart-decl-output flutter/lib/generated_bridge.freezed.dart --skip-deps-check
+          cd flutter
+          flutter pub run build_runner build --delete-conflicting-outputs
+
+      - name: Patch UI
+        shell: powershell
+        run: |
+          $path = "flutter/lib/desktop/widgets/tabbar_widget.dart"
+          $code = "import 'package:flutter/material.dart';`nimport 'package:flutter/foundation.dart';`nclass DesktopTabController {}`nclass TabInfo {}`nenum DesktopTabType { remote, fileManager, portForward, terminal, camera }`nclass TabbarTheme extends ThemeExtension<TabbarTheme> {`n  final Color selectedTabIconColor, unSelectedTabIconColor, selectedTextColor, unSelectedTextColor, selectedIconColor, unSelectedIconColor, dividerColor, hoverColor, closeHoverColor, selectedTabBackgroundColor;`n  TabbarTheme({this.selectedTabIconColor=Colors.blue, this.unSelectedTabIconColor=Colors.grey, this.selectedTextColor=Colors.black, this.unSelectedTextColor=Colors.black54, this.selectedIconColor=Colors.blue, this.unSelectedIconColor=Colors.grey, this.dividerColor=Colors.transparent, this.hoverColor=Colors.white12, this.closeHoverColor=Colors.red, this.selectedTabBackgroundColor=Colors.white});`n  @override TabbarTheme copyWith() => this;`n  @override TabbarTheme lerp(ThemeExtension<TabbarTheme>? other, double t) => this;`n}"
+          [System.IO.File]::WriteAllText($path, $code)
           
-          # 重新构建整个文件，包含所有丢失的类定义
-          $stub = @"
-import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
-
-// 补全丢失的关键类
-class DesktopTabController {}
-class TabInfo {}
-enum DesktopTabType { remote, fileManager, portForward, terminal, camera }
-
-class TabbarTheme extends ThemeExtension<TabbarTheme> {
-  final Color selectedTabIconColor;
-  final Color unSelectedTabIconColor;
-  final Color selectedTextColor;
-  final Color unSelectedTextColor;
-  final Color selectedIconColor;
-  final Color unSelectedIconColor;
-  final Color dividerColor;
-  final Color hoverColor;
-  final Color closeHoverColor;
-  final Color selectedTabBackgroundColor;
-
-  TabbarTheme({
-    this.selectedTabIconColor = Colors.blue,
-    this.unSelectedTabIconColor = Colors.grey,
-    this.selectedTextColor = Colors.black,
-    this.unSelectedTextColor = Colors.black54,
-    this.selectedIconColor = Colors.blue,
-    this.unSelectedIconColor = Colors.grey,
-    this.dividerColor = Colors.transparent,
-    this.hoverColor = Colors.white12,
-    this.closeHoverColor = Colors.red,
-    this.selectedTabBackgroundColor = Colors.white,
-  });
-
-  @override
-  TabbarTheme copyWith() => this;
-  @override
-  TabbarTheme lerp(ThemeExtension<TabbarTheme>? other, double t) => this;
-}
-"@
-          # 使用 UTF8 编码写入，防止乱码导致编译器报错
-          [System.IO.File]::WriteAllText($tabbarPath, $stub, [System.Text.Encoding]::UTF8)
-
-          # 修复 DialogTheme/TabBarTheme 全局引用
           Get-ChildItem -Path "flutter/lib" -Recurse -Include *.dart | ForEach-Object {
               $t = Get-Content $_.FullName -Raw
               if ($t -match 'DialogTheme|TabBarTheme') {
-                  $t = $t -replace 'DialogTheme\(', 'DialogThemeData(' `
-                          -replace 'TabBarTheme\(', 'TabBarThemeData(' `
-                          -replace 'DialogTheme\?', 'DialogThemeData?' `
-                          -replace 'TabBarTheme\?', 'TabBarThemeData?'
-                  [System.IO.File]::WriteAllText($_.FullName, $t, [System.Text.Encoding]::UTF8)
+                  $t = $t -replace 'DialogTheme\(', 'DialogThemeData(' -replace 'TabBarTheme\(', 'TabBarThemeData(' -replace 'DialogTheme\?', 'DialogThemeData?' -replace 'TabBarTheme\?', 'TabBarThemeData?'
+                  [System.IO.File]::WriteAllText($_.FullName, $t)
               }
           }
 
-      - name: Fix Freezed and Build
+      - name: Build
         shell: powershell
         run: |
-          cd flutter
-          # 强制重新运行生成器，解决 EventToUI 丢失问题
-          flutter pub get
-          flutter pub run build_runner build --delete-conflicting-outputs
-          cd ..
-          
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
-          $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\shared`" -I`"$env:VCToolsInstallDir\include`""
-          
-          # 执行 RustDesk 专用的构建脚本
+          $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`""
           python build.py --flutter
-          
           cd flutter
           flutter build windows --release --no-tree-shake-icons
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustDesk-Windows
+          path: flutter/build/windows/x64/runner/Release/
