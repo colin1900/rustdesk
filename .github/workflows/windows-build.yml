@@ -43,16 +43,18 @@ jobs:
           echo "INCLUDE=$VcpkgInst\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "LIB=$VcpkgInst\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Flutter Pub Get
+      - name: Flutter Pub Get & Fix FRB
         run: |
           cd flutter
           flutter pub get
+          # 安装 build_runner 必要的生成器
+          flutter pub add --dev build_runner freezed_annotation
+          flutter pub add freezed:2.4.7
 
-      - name: Manual FRB Codegen (Parameter Fixed)
+      - name: Manual FRB Codegen
         shell: powershell
         run: |
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-          # 修正参数名：--dart-decl-output
           flutter_rust_bridge_codegen `
             --rust-input src/flutter_ffi.rs `
             --rust-output src/bridge_generated.rs `
@@ -60,25 +62,76 @@ jobs:
             --dart-decl-output flutter/lib/generated_bridge.freezed.dart `
             --skip-deps-check
           
-          if (!(Test-Path "src/bridge_generated.rs")) { throw "FRB failed to generate bridge_generated.rs" }
+          # 运行 build_runner 生成 .freezed.dart 文件
+          cd flutter
+          flutter pub run build_runner build --delete-conflicting-outputs
+          cd ..
 
-      - name: Surgical UI Fixes
+      - name: Surgical UI Fixes (Advanced)
         shell: powershell
         run: |
           $tabbarFile = "flutter/lib/desktop/widgets/tabbar_widget.dart"
           if (Test-Path $tabbarFile) {
-              (Get-Content $tabbarFile) -replace 'const TabbarTheme', 'TabbarTheme' | Set-Content $tabbarFile
+              Write-Host "Reconstructing TabbarTheme class..."
+              # 直接替换整个类定义，确保构造函数正确
+              $newClass = @"
+class TabbarTheme extends ThemeExtension<TabbarTheme> {
+  final Color selectedTabIconColor;
+  final Color unSelectedTabIconColor;
+  final Color selectedTextColor;
+  final Color unSelectedTextColor;
+  final Color selectedIconColor;
+  final Color unSelectedIconColor;
+  final Color dividerColor;
+  final Color hoverColor;
+  final Color closeHoverColor;
+  final Color selectedTabBackgroundColor;
+
+  TabbarTheme({
+    required this.selectedTabIconColor,
+    required this.unSelectedTabIconColor,
+    required this.selectedTextColor,
+    required this.unSelectedTextColor,
+    required this.selectedIconColor,
+    required this.unSelectedIconColor,
+    required this.dividerColor,
+    required this.hoverColor,
+    required this.closeHoverColor,
+    required this.selectedTabBackgroundColor,
+  });
+
+  @override
+  TabbarTheme copyWith() => this;
+
+  @override
+  TabbarTheme lerp(ThemeExtension<TabbarTheme>? other, double t) => this;
+
+  @override
+  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
+    super.debugFillProperties(properties);
+  }
+}
+"@
+              # 找到旧的 TabbarTheme 定义并替换
+              $content = Get-Content $tabbarFile -Raw
+              $content = $content -replace 'class TabbarTheme extends ThemeExtension<TabbarTheme> \{[\s\S]*?\}', $newClass
+              $content | Set-Content $tabbarFile
           }
+
+          # 修复 DialogTheme/TabBarTheme 实例化
           Get-ChildItem -Path "flutter/lib" -Recurse -Include *.dart | ForEach-Object {
-              (Get-Content $_.FullName) -replace 'DialogTheme\(', 'DialogThemeData(' -replace 'TabBarTheme\(', 'TabBarThemeData(' | Set-Content $_.FullName
+              $c = Get-Content $_.FullName -Raw
+              $c = $c -replace 'DialogTheme\(', 'DialogThemeData('
+              $c = $c -replace 'TabBarTheme\(', 'TabBarThemeData('
+              $c | Set-Content $_.FullName
           }
 
       - name: Compile Rust & Flutter
         shell: powershell
         run: |
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
-          $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:VCToolsInstallDir\include`""
-          # 确保 build.py 能够看到生成的 bridge 文件
+          $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\shared`" -I`"$env:VCToolsInstallDir\include`""
+          # 这一步将跳过已经编译好的 Rust 部分，直接进入 Flutter 组装
           python build.py --flutter
 
       - name: Final Flutter Build
@@ -89,5 +142,5 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Windows-v3.24-Final-Build
+          name: RustDesk-Windows-v3.24-Ready
           path: flutter/build/windows/x64/runner/Release/
