@@ -31,7 +31,9 @@ jobs:
       - name: Install Build Tools
         run: |
           choco install llvm nasm ninja -y
-          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          pip install --upgrade pip
+          # 必须安装 build.py 依赖的 Python 库
+          pip install requests
 
       - name: Setup Dependencies
         shell: powershell
@@ -43,69 +45,46 @@ jobs:
           echo "INCLUDE=$VcpkgInst\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "LIB=$VcpkgInst\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Pre-initialize Flutter
+      - name: Initialize Flutter & Fix UI
         shell: powershell
         run: |
           cd flutter
-          # 必须先执行这一步，否则 ffigen 会找不到 package_config.json
           flutter pub get
-          cd ..
-
-      - name: FRB Codegen
-        shell: powershell
-        run: |
-          cargo install flutter_rust_bridge_codegen --version 1.80.1
-          if (Test-Path "src/bridge_generated.rs") { Remove-Item "src/bridge_generated.rs" }
-          
-          # 生成桥接代码
-          flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart --skip-deps-check
-          
-          # 注入引用以修复 Rust 编译时的 Dart_Handle 报错
-          $bridgeFile = "src/bridge_generated.rs"
-          $bridgeContent = Get-Content $bridgeFile
-          "use flutter_rust_bridge::support::DartHandle;" + $bridgeContent | Set-Content $bridgeFile
-
-      - name: Surgical Code Fixes
-        shell: powershell
-        run: |
-          # 1. 修复 TabbarTheme 语法冲突
-          $tabbarFile = "flutter/lib/desktop/widgets/tabbar_widget.dart"
+          # 针对 Flutter 3.24+ 的代码补丁（修复 TabbarTheme 报错）
+          $tabbarFile = "lib/desktop/widgets/tabbar_widget.dart"
           if (Test-Path $tabbarFile) {
               $content = Get-Content $tabbarFile
-              # 移除不兼容的 const
               $content = $content -replace 'const TabbarTheme', 'TabbarTheme'
-              # 修复字段初始化报错：注入 debugFillProperties
+              # 注入缺少的 debugFillProperties
               if ($content -notlike "*debugFillProperties*") {
                   $content = $content -replace '}\s*$', "`n  @override`n  void debugFillProperties(DiagnosticPropertiesBuilder properties) {`n    super.debugFillProperties(properties);`n  }`n}"
               }
               $content | Set-Content $tabbarFile
           }
+          cd ..
 
-          # 2. 修复全局 Theme 命名冲突 (Flutter 3.x 规范)
-          Get-ChildItem -Path "flutter/lib" -Recurse -Include *.dart | ForEach-Object {
-              (Get-Content $_.FullName) `
-              -replace 'DialogTheme\(', 'DialogThemeData(' `
-              -replace 'DialogTheme\?', 'DialogThemeData?' `
-              -replace 'TabBarTheme\(', 'TabBarThemeData(' `
-              -replace 'TabBarTheme\?', 'TabBarThemeData?' `
-              | Set-Content $_.FullName
-          }
-
-      - name: Build Preparation & Cargo
+      - name: Build Rust & Flutter (Using Official build.py)
         shell: powershell
         run: |
+          # 1. 安装指定版本的 FRB
+          cargo install flutter_rust_bridge_codegen --version 1.80.1
+          
+          # 2. 核心：由 build.py 自动处理生成的 bridge_generated.rs，不再手动修改它
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:VCToolsInstallDir\include`""
+          
+          # 运行官方构建脚本
           python build.py --flutter
 
-      - name: Build Windows App
+      - name: Finalize Windows App
         shell: powershell
         run: |
           cd flutter
+          # 最终的 Flutter 构建
           flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Windows-v3.24-Final
+          name: RustDesk-Windows-Final
           path: flutter/build/windows/x64/runner/Release/
