@@ -44,10 +44,10 @@ jobs:
           echo "LIB=$VcpkgInst\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Flutter Pub Get & Fix FRB
+        shell: powershell
         run: |
           cd flutter
           flutter pub get
-          # 安装 build_runner 必要的生成器
           flutter pub add --dev build_runner freezed_annotation
           flutter pub add freezed:2.4.7
 
@@ -61,64 +61,36 @@ jobs:
             --dart-output flutter/lib/generated_bridge.dart `
             --dart-decl-output flutter/lib/generated_bridge.freezed.dart `
             --skip-deps-check
-          
-          # 运行 build_runner 生成 .freezed.dart 文件
           cd flutter
           flutter pub run build_runner build --delete-conflicting-outputs
-          cd ..
 
-      - name: Surgical UI Fixes (Advanced)
+      - name: Surgical UI Fixes
         shell: powershell
         run: |
           $tabbarFile = "flutter/lib/desktop/widgets/tabbar_widget.dart"
           if (Test-Path $tabbarFile) {
-              Write-Host "Reconstructing TabbarTheme class..."
-              # 直接替换整个类定义，确保构造函数正确
-              $newClass = @"
-class TabbarTheme extends ThemeExtension<TabbarTheme> {
-  final Color selectedTabIconColor;
-  final Color unSelectedTabIconColor;
-  final Color selectedTextColor;
-  final Color unSelectedTextColor;
-  final Color selectedIconColor;
-  final Color unSelectedIconColor;
-  final Color dividerColor;
-  final Color hoverColor;
-  final Color closeHoverColor;
-  final Color selectedTabBackgroundColor;
-
-  TabbarTheme({
-    required this.selectedTabIconColor,
-    required this.unSelectedTabIconColor,
-    required this.selectedTextColor,
-    required this.unSelectedTextColor,
-    required this.selectedIconColor,
-    required this.unSelectedIconColor,
-    required this.dividerColor,
-    required this.hoverColor,
-    required this.closeHoverColor,
-    required this.selectedTabBackgroundColor,
-  });
-
-  @override
-  TabbarTheme copyWith() => this;
-
-  @override
-  TabbarTheme lerp(ThemeExtension<TabbarTheme>? other, double t) => this;
-
-  @override
-  void debugFillProperties(DiagnosticPropertiesBuilder properties) {
-    super.debugFillProperties(properties);
-  }
-}
-"@
-              # 找到旧的 TabbarTheme 定义并替换
+              # 使用更安全的字符串拼接方式，避免 YAML 多行语法冲突
               $content = Get-Content $tabbarFile -Raw
+              $newClass = "class TabbarTheme extends ThemeExtension<TabbarTheme> {`n" +
+                          "  final Color selectedTabIconColor;`n" +
+                          "  final Color unSelectedTabIconColor;`n" +
+                          "  final Color selectedTextColor;`n" +
+                          "  final Color unSelectedTextColor;`n" +
+                          "  final Color selectedIconColor;`n" +
+                          "  final Color unSelectedIconColor;`n" +
+                          "  final Color dividerColor;`n" +
+                          "  final Color hoverColor;`n" +
+                          "  final Color closeHoverColor;`n" +
+                          "  final Color selectedTabBackgroundColor;`n`n" +
+                          "  TabbarTheme({required this.selectedTabIconColor, required this.unSelectedTabIconColor, required this.selectedTextColor, required this.unSelectedTextColor, required this.selectedIconColor, required this.unSelectedIconColor, required this.dividerColor, required this.hoverColor, required this.closeHoverColor, required this.selectedTabBackgroundColor});`n`n" +
+                          "  @override TabbarTheme copyWith() => this;`n" +
+                          "  @override TabbarTheme lerp(ThemeExtension<TabbarTheme>? other, double t) => this;`n" +
+                          "  @override void debugFillProperties(DiagnosticPropertiesBuilder properties) { super.debugFillProperties(properties); }`n" +
+                          "}"
               $content = $content -replace 'class TabbarTheme extends ThemeExtension<TabbarTheme> \{[\s\S]*?\}', $newClass
               $content | Set-Content $tabbarFile
           }
-
-          # 修复 DialogTheme/TabBarTheme 实例化
+          # 修复命名空间
           Get-ChildItem -Path "flutter/lib" -Recurse -Include *.dart | ForEach-Object {
               $c = Get-Content $_.FullName -Raw
               $c = $c -replace 'DialogTheme\(', 'DialogThemeData('
@@ -131,10 +103,10 @@ class TabbarTheme extends ThemeExtension<TabbarTheme> {
         run: |
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\shared`" -I`"$env:VCToolsInstallDir\include`""
-          # 这一步将跳过已经编译好的 Rust 部分，直接进入 Flutter 组装
           python build.py --flutter
 
       - name: Final Flutter Build
+        shell: powershell
         run: |
           cd flutter
           flutter build windows --release --no-tree-shake-icons
@@ -142,5 +114,5 @@ class TabbarTheme extends ThemeExtension<TabbarTheme> {
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Windows-v3.24-Ready
+          name: RustDesk-Windows-v3.24-Final
           path: flutter/build/windows/x64/runner/Release/
