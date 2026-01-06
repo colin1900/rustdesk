@@ -31,60 +31,67 @@ jobs:
       - name: Install Build Tools
         run: |
           choco install llvm nasm ninja -y
-          pip install --upgrade pip
-          # 必须安装 build.py 依赖的 Python 库
           pip install requests
 
-      - name: Setup Dependencies
+      - name: Setup VCPKG
         shell: powershell
         run: |
-          $VcpkgExe = "C:\vcpkg\vcpkg.exe"
-          & $VcpkgExe install ffmpeg[avcodec,avformat,swresample,swscale] libvpx libyuv opus aom --triplet x64-windows-static --classic
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
+          & C:\vcpkg\vcpkg.exe install ffmpeg[avcodec,avformat,swresample,swscale] libvpx libyuv opus aom --triplet x64-windows-static --classic
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "INCLUDE=$VcpkgInst\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "LIB=$VcpkgInst\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Initialize Flutter & Fix UI
-        shell: powershell
+      - name: Flutter Pub Get
         run: |
           cd flutter
           flutter pub get
-          # 针对 Flutter 3.24+ 的代码补丁（修复 TabbarTheme 报错）
-          $tabbarFile = "lib/desktop/widgets/tabbar_widget.dart"
-          if (Test-Path $tabbarFile) {
-              $content = Get-Content $tabbarFile
-              $content = $content -replace 'const TabbarTheme', 'TabbarTheme'
-              # 注入缺少的 debugFillProperties
-              if ($content -notlike "*debugFillProperties*") {
-                  $content = $content -replace '}\s*$', "`n  @override`n  void debugFillProperties(DiagnosticPropertiesBuilder properties) {`n    super.debugFillProperties(properties);`n  }`n}"
-              }
-              $content | Set-Content $tabbarFile
-          }
-          cd ..
 
-      - name: Build Rust & Flutter (Using Official build.py)
+      - name: Manual FRB Codegen (Critical Step)
         shell: powershell
         run: |
-          # 1. 安装指定版本的 FRB
           cargo install flutter_rust_bridge_codegen --version 1.80.1
+          # 强制生成到 src 目录，解决 mod bridge_generated 找不到的问题
+          flutter_rust_bridge_codegen `
+            --rust-input src/flutter_ffi.rs `
+            --rust-output src/bridge_generated.rs `
+            --dart-output flutter/lib/generated_bridge.dart `
+            --dart-decl-output-path flutter/lib/generated_bridge.freezed.dart `
+            --skip-deps-check `
+            --wasm
           
-          # 2. 核心：由 build.py 自动处理生成的 bridge_generated.rs，不再手动修改它
+          # 验证文件是否存在
+          if (!(Test-Path "src/bridge_generated.rs")) { throw "FRB failed to generate bridge_generated.rs" }
+
+      - name: Surgical UI Fixes
+        shell: powershell
+        run: |
+          # 修复 Flutter 3.24+ 兼容性
+          $tabbarFile = "flutter/lib/desktop/widgets/tabbar_widget.dart"
+          if (Test-Path $tabbarFile) {
+              (Get-Content $tabbarFile) -replace 'const TabbarTheme', 'TabbarTheme' | Set-Content $tabbarFile
+          }
+          # 批量替换 Theme 类名
+          Get-ChildItem -Path "flutter/lib" -Recurse -Include *.dart | ForEach-Object {
+              (Get-Content $_.FullName) -replace 'DialogTheme\(', 'DialogThemeData(' -replace 'TabBarTheme\(', 'TabBarThemeData(' | Set-Content $_.FullName
+          }
+
+      - name: Compile Rust Desk
+        shell: powershell
+        run: |
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:VCToolsInstallDir\include`""
-          
-          # 运行官方构建脚本
+          # 运行官方构建，它会自动识别并编译刚才生成的 bridge_generated.rs
           python build.py --flutter
 
-      - name: Finalize Windows App
-        shell: powershell
+      - name: Final Flutter Build
         run: |
           cd flutter
-          # 最终的 Flutter 构建
           flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Windows-Final
+          name: RustDesk-Windows-v3.24-Clean
           path: flutter/build/windows/x64/runner/Release/
