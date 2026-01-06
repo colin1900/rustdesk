@@ -9,10 +9,11 @@ jobs:
   build:
     runs-on: windows-2022
     steps:
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -25,20 +26,22 @@ jobs:
         with:
           flutter-version: '3.24.0'
 
-      - name: Build Tools
+      - name: Install Build Tools
         run: |
           choco install llvm nasm ninja -y
           pip install requests
 
-      - name: VCPKG Setup
+      - name: Setup VCPKG
         shell: powershell
         run: |
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
           & C:\vcpkg\vcpkg.exe install ffmpeg[avcodec,avformat,swresample,swscale] libvpx libyuv opus aom --triplet x64-windows-static --classic
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "INCLUDE=$VcpkgInst\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "LIB=$VcpkgInst\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Flutter Pre-build
+      - name: Flutter Dependencies
         shell: powershell
         run: |
           cd flutter
@@ -46,40 +49,56 @@ jobs:
           flutter pub add --dev build_runner freezed_annotation
           flutter pub add freezed:2.4.7
 
-      - name: Codegen
+      - name: FRB Codegen
         shell: powershell
         run: |
           cargo install flutter_rust_bridge_codegen --version 1.80.1
-          flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart --dart-decl-output flutter/lib/generated_bridge.freezed.dart --skip-deps-check
+          # 生成桥接 Dart 代码
+          flutter_rust_bridge_codegen `
+            --rust-input src/flutter_ffi.rs `
+            --rust-output src/bridge_generated.rs `
+            --dart-output flutter/lib/generated_bridge.dart `
+            --dart-decl-output flutter/lib/generated_bridge.freezed.dart `
+            --skip-deps-check
+          
+          # 生成 Freezed 类（解决 EventToUI 找不到的问题）
           cd flutter
           flutter pub run build_runner build --delete-conflicting-outputs
 
-      - name: Patch UI
+      - name: Patch UI Compatibility
         shell: powershell
         run: |
-          $path = "flutter/lib/desktop/widgets/tabbar_widget.dart"
-          $code = "import 'package:flutter/material.dart';`nimport 'package:flutter/foundation.dart';`nclass DesktopTabController {}`nclass TabInfo {}`nenum DesktopTabType { remote, fileManager, portForward, terminal, camera }`nclass TabbarTheme extends ThemeExtension<TabbarTheme> {`n  final Color selectedTabIconColor, unSelectedTabIconColor, selectedTextColor, unSelectedTextColor, selectedIconColor, unSelectedIconColor, dividerColor, hoverColor, closeHoverColor, selectedTabBackgroundColor;`n  TabbarTheme({this.selectedTabIconColor=Colors.blue, this.unSelectedTabIconColor=Colors.grey, this.selectedTextColor=Colors.black, this.unSelectedTextColor=Colors.black54, this.selectedIconColor=Colors.blue, this.unSelectedIconColor=Colors.grey, this.dividerColor=Colors.transparent, this.hoverColor=Colors.white12, this.closeHoverColor=Colors.red, this.selectedTabBackgroundColor=Colors.white});`n  @override TabbarTheme copyWith() => this;`n  @override TabbarTheme lerp(ThemeExtension<TabbarTheme>? other, double t) => this;`n}"
-          [System.IO.File]::WriteAllText($path, $code)
+          # 1. 恢复之前可能被错误覆盖的 UI 定义文件
+          git checkout flutter/lib/desktop/widgets/tabbar_widget.dart
+          git checkout flutter/lib/desktop/pages/
           
+          # 2. 批量替换旧版 Flutter 的 Theme 命名（新版 Flutter 3.24 必须使用 Data 后缀）
           Get-ChildItem -Path "flutter/lib" -Recurse -Include *.dart | ForEach-Object {
-              $t = Get-Content $_.FullName -Raw
-              if ($t -match 'DialogTheme|TabBarTheme') {
-                  $t = $t -replace 'DialogTheme\(', 'DialogThemeData(' -replace 'TabBarTheme\(', 'TabBarThemeData(' -replace 'DialogTheme\?', 'DialogThemeData?' -replace 'TabBarTheme\?', 'TabBarThemeData?'
-                  [System.IO.File]::WriteAllText($_.FullName, $t)
+              $content = Get-Content $_.FullName -Raw
+              if ($content -match 'DialogTheme|TabBarTheme') {
+                  $content = $content -replace 'DialogTheme\(', 'DialogThemeData(' `
+                                      -replace 'TabBarTheme\(', 'TabBarThemeData(' `
+                                      -replace 'DialogTheme\?', 'DialogThemeData?' `
+                                      -replace 'TabBarTheme\?', 'TabBarThemeData?'
+                  [System.IO.File]::WriteAllText($_.FullName, $content, [System.Text.Encoding]::UTF8)
               }
           }
 
-      - name: Build
+      - name: Run Build Script
         shell: powershell
         run: |
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
-          $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`""
+          $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\shared`" -I`"$env:VCToolsInstallDir\include`""
+          
+          # 运行 RustDesk 的构建 Python 脚本
           python build.py --flutter
+          
+          # 最后编译 Windows 可执行文件
           cd flutter
           flutter build windows --release --no-tree-shake-icons
 
-      - name: Upload
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Windows
+          name: RustDesk-Windows-x64
           path: flutter/build/windows/x64/runner/Release/
