@@ -36,23 +36,17 @@ jobs:
         run: |
           $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
           & C:\vcpkg\vcpkg.exe install ffmpeg[avcodec,avformat,swresample,swscale] libvpx libyuv opus aom --triplet x64-windows-static --classic
-          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "INCLUDE=$VcpkgInst\include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "LIB=$VcpkgInst\lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Flutter Dependencies
-        shell: powershell
-        run: |
-          cd flutter
-          flutter pub get
-          flutter pub add --dev build_runner freezed_annotation
-          flutter pub add freezed:2.4.7
+          
+          # 关键修复：导出环境变量确保 Clang 能找到 Windows SDK
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
       - name: FRB Codegen
         shell: powershell
         run: |
+          # 使用 1.80.1 版本匹配源代码结构
           cargo install flutter_rust_bridge_codegen --version 1.80.1
+          
           # 生成桥接 Dart 代码
           flutter_rust_bridge_codegen `
             --rust-input src/flutter_ffi.rs `
@@ -61,39 +55,47 @@ jobs:
             --dart-decl-output flutter/lib/generated_bridge.freezed.dart `
             --skip-deps-check
           
-          # 生成 Freezed 类（解决 EventToUI 找不到的问题）
           cd flutter
+          flutter pub get
+          # 必须执行生成 freezed 文件
           flutter pub run build_runner build --delete-conflicting-outputs
 
-      - name: Patch UI Compatibility
+      - name: Patch UI & Fix Type Errors
         shell: powershell
         run: |
-          # 1. 恢复之前可能被错误覆盖的 UI 定义文件
-          git checkout flutter/lib/desktop/widgets/tabbar_widget.dart
-          git checkout flutter/lib/desktop/pages/
-          
-          # 2. 批量替换旧版 Flutter 的 Theme 命名（新版 Flutter 3.24 必须使用 Data 后缀）
+          # 1. 修复 Flutter 3.24+ 兼容性命名
           Get-ChildItem -Path "flutter/lib" -Recurse -Include *.dart | ForEach-Object {
-              $content = Get-Content $_.FullName -Raw
-              if ($content -match 'DialogTheme|TabBarTheme') {
-                  $content = $content -replace 'DialogTheme\(', 'DialogThemeData(' `
-                                      -replace 'TabBarTheme\(', 'TabBarThemeData(' `
-                                      -replace 'DialogTheme\?', 'DialogThemeData?' `
-                                      -replace 'TabBarTheme\?', 'TabBarThemeData?'
-                  [System.IO.File]::WriteAllText($_.FullName, $content, [System.Text.Encoding]::UTF8)
+              $t = Get-Content $_.FullName -Raw
+              if ($t -match 'DialogTheme|TabBarTheme') {
+                  $t = $t -replace 'DialogTheme\(', 'DialogThemeData(' `
+                          -replace 'TabBarTheme\(', 'TabBarThemeData(' `
+                          -replace 'DialogTheme\?', 'DialogThemeData?' `
+                          -replace 'TabBarTheme\?', 'TabBarThemeData?'
+                  [System.IO.File]::WriteAllText($_.FullName, $t, [System.Text.Encoding]::UTF8)
               }
           }
 
-      - name: Run Build Script
+          # 2. 修复 FRB 产生的 bool vs NativeFunction 错误
+          # 将错误的 == 运算符定义强行纠正回 bool
+          $bridgeFile = "flutter/lib/generated_bridge.dart"
+          if (Test-Path $bridgeFile) {
+              $content = Get-Content $bridgeFile -Raw
+              $content = $content -replace 'NativeFunction<Int Function\(Pointer<Int>\)> get ==', 'bool operator =='
+              [System.IO.File]::WriteAllText($bridgeFile, $content, [System.Text.Encoding]::UTF8)
+          }
+
+      - name: Run Build
         shell: powershell
         run: |
-          $VcpkgInst = "C:\vcpkg\installed\x64-windows-static"
-          $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$VcpkgInst\include`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\ucrt`" -I`"$env:UniversalCRTSdkDir\Include\$env:UCRTVersion\shared`" -I`"$env:VCToolsInstallDir\include`""
+          # 关键：手动指定 SDK 包含目录，解决 kcp-sys 找不到 stdlib.h 的问题
+          $UCRT_PATH = "C:\Program Files (x86)\Windows Kits\10\Include\$env:UCRTVersion\ucrt"
+          $MSVC_PATH = "$env:VCToolsInstallDir\include"
+          $VCPKG_INC = "C:\vcpkg\installed\x64-windows-static\include"
           
-          # 运行 RustDesk 的构建 Python 脚本
+          $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"$UCRT_PATH`" -I`"$MSVC_PATH`" -I`"$VCPKG_INC`""
+          
           python build.py --flutter
           
-          # 最后编译 Windows 可执行文件
           cd flutter
           flutter build windows --release --no-tree-shake-icons
 
