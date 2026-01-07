@@ -38,25 +38,47 @@ jobs:
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
-      - name: FRB Codegen
+      - name: FRB Codegen & Deduplicate Symbols
         shell: powershell
         run: |
+          # 1. 安装指定版本的 Codegen 以匹配项目依赖
           cargo install flutter_rust_bridge_codegen --version 1.80.1
           
-          # 生成桥接文件
+          # 2. 生成桥接文件
           flutter_rust_bridge_codegen `
             --rust-input src/flutter_ffi.rs `
             --rust-output src/bridge_generated.rs `
             --dart-output flutter/lib/generated_bridge.dart `
             --skip-deps-check
 
-          # 【修复 Rust】不再插入 Header，而是直接替换报错的占位符类型
+          # 3. 【核心修复】移除冲突的 C 符号，解决 LNK2005 错误
           $rustBridge = "src/bridge_generated.rs"
           $c = Get-Content $rustBridge -Raw
-          # 将找不到的 Dart_Handle 替换为通用的 usize 指针（FRB 内部处理方式）
+          
+          # 这些函数在 flutter_rust_bridge 库中已存在，重复定义会导致链接失败
+          $conflicts = @(
+            "store_dart_post_cobject",
+            "get_dart_object",
+            "drop_dart_object",
+            "new_dart_opaque",
+            "init_frb_dart_api_dl"
+          )
+
+          foreach ($fn in $conflicts) {
+              # 使用正则表达式匹配 #[no_mangle] 标记的函数并将其注释掉
+              $pattern = '(?s)#\[no_mangle\]\s+pub\s+unsafe\s+extern\s+"C"\s+fn\s+' + $fn + '\s*\(.*?\)\s*->?\s*.*?\s*\{.*?\}'
+              if ($c -match $pattern) {
+                  Write-Host "Removing conflicting symbol: $fn"
+                  $c = $c -replace $pattern, "/* Removed $fn to avoid LNK2005 */"
+              }
+          }
+
+          # 4. 修复 Dart_Handle 未定义问题 (将其映射为通用指针类型)
           $c = $c -replace 'Dart_Handle', 'isize'
+
           [System.IO.File]::WriteAllText($rustBridge, $c, [System.Text.Encoding]::UTF8)
 
+          # 5. 生成 Dart 代码
           cd flutter
           flutter pub get
           flutter pub run build_runner build --delete-conflicting-outputs
@@ -64,38 +86,37 @@ jobs:
       - name: Patch Flutter UI & Const Errors
         shell: powershell
         run: |
-          # 【全面修复 Flutter】
+          # 修复 Flutter 3.24 升级带来的 Theme 类型变更和 const 冲突
           $files = Get-ChildItem -Path "flutter/lib" -Filter "*.dart" -Recurse
           foreach ($file in $files) {
               $t = Get-Content $file.FullName -Raw
+              $modified = $false
               
-              # 1. 移除所有不合法的 const 修饰（针对 Theme 相关）
               if ($t -match 'TabbarTheme|DialogTheme') {
                   $t = $t -replace 'const TabbarTheme\(', 'TabbarTheme(' `
                           -replace 'const DialogTheme\(', 'DialogTheme(' `
                           -replace 'TabbarTheme', 'TabBarThemeData' `
                           -replace 'DialogTheme\(', 'DialogThemeData('
+                  $modified = $true
               }
               
-              # 2. 修复生成的 bridge 类型冲突
-              if ($file.Name -eq "generated_bridge.dart") {
-                  $t = $t -replace 'NativeFunction<Int Function\(Pointer<Int>\)> get ==', 'bool operator =='
+              if ($modified) {
+                  [System.IO.File]::WriteAllText($file.FullName, $t, [System.Text.Encoding]::UTF8)
               }
-              
-              [System.IO.File]::WriteAllText($file.FullName, $t, [System.Text.Encoding]::UTF8)
           }
 
       - name: Run Build
         shell: powershell
         run: |
-          # 获取 Windows SDK 版本用于路径拼接
+          # 自动获取 Windows SDK 路径以确保 bindgen 能找到头文件
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
+          # 执行 RustDesk 核心构建脚本
           python build.py --flutter
           
           cd flutter
-          # 忽略空检查错误强制构建（针对 String? 分配给 String 的问题）
+          # 允许空安全非严苛模式构建以处理 String? 类型兼容问题
           flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
