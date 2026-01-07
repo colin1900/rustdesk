@@ -38,85 +38,88 @@ jobs:
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
-      - name: FRB Codegen & Deduplicate Symbols
+      - name: Dynamic FRB Codegen & Fix Symbols
         shell: powershell
         run: |
-          # 1. 安装指定版本的 Codegen 以匹配项目依赖
-          cargo install flutter_rust_bridge_codegen --version 1.80.1
-          
-          # 2. 生成桥接文件
+          # 1. 动态获取 pubspec.yaml 中的版本号
+          $pubspec = Get-Content flutter/pubspec.yaml -Raw
+          if ($pubspec -match 'flutter_rust_bridge:\s*[\^~]?([0-9\.]+)') {
+              $frbVersion = $Matches[1]
+              Write-Host "Detected FRB Version from pubspec: $frbVersion"
+              cargo install flutter_rust_bridge_codegen --version $frbVersion
+          } else {
+              Write-Host "Could not detect version, falling back to 1.80.1"
+              cargo install flutter_rust_bridge_codegen --version 1.80.1
+          }
+
+          # 2. 生成桥接代码
           flutter_rust_bridge_codegen `
             --rust-input src/flutter_ffi.rs `
             --rust-output src/bridge_generated.rs `
-            --dart-output flutter/lib/generated_bridge.dart `
-            --skip-deps-check
+            --dart-output flutter/lib/generated_bridge.dart
 
-          # 3. 【核心修复】移除冲突的 C 符号，解决 LNK2005 错误
+          # 3. 核心修复：移除重复的 C 符号 (解决 LNK2005)
           $rustBridge = "src/bridge_generated.rs"
-          $c = Get-Content $rustBridge -Raw
-          
-          # 这些函数在 flutter_rust_bridge 库中已存在，重复定义会导致链接失败
-          $conflicts = @(
-            "store_dart_post_cobject",
-            "get_dart_object",
-            "drop_dart_object",
-            "new_dart_opaque",
-            "init_frb_dart_api_dl"
-          )
-
-          foreach ($fn in $conflicts) {
-              # 使用正则表达式匹配 #[no_mangle] 标记的函数并将其注释掉
-              $pattern = '(?s)#\[no_mangle\]\s+pub\s+unsafe\s+extern\s+"C"\s+fn\s+' + $fn + '\s*\(.*?\)\s*->?\s*.*?\s*\{.*?\}'
-              if ($c -match $pattern) {
-                  Write-Host "Removing conflicting symbol: $fn"
+          if (Test-Path $rustBridge) {
+              $c = Get-Content $rustBridge -Raw
+              $conflicts = @("store_dart_post_cobject","get_dart_object","drop_dart_object","new_dart_opaque","init_frb_dart_api_dl")
+              foreach ($fn in $conflicts) {
+                  $pattern = '(?s)#\[no_mangle\]\s+pub\s+unsafe\s+extern\s+"C"\s+fn\s+' + $fn + '\s*\(.*?\)\s*->?\s*.*?\s*\{.*?\}'
                   $c = $c -replace $pattern, "/* Removed $fn to avoid LNK2005 */"
               }
+              $c = $c -replace 'Dart_Handle', 'isize'
+              [System.IO.File]::WriteAllText($rustBridge, $c, [System.Text.Encoding]::UTF8)
+              Write-Host "Rust bridge symbols patched."
           }
 
-          # 4. 修复 Dart_Handle 未定义问题 (将其映射为通用指针类型)
-          $c = $c -replace 'Dart_Handle', 'isize'
-
-          [System.IO.File]::WriteAllText($rustBridge, $c, [System.Text.Encoding]::UTF8)
-
-          # 5. 生成 Dart 代码
-          cd flutter
-          flutter pub get
-          flutter pub run build_runner build --delete-conflicting-outputs
-
-      - name: Patch Flutter UI & Const Errors
+      - name: Patch Flutter UI for 3.24 Compatibility
         shell: powershell
         run: |
-          # 修复 Flutter 3.24 升级带来的 Theme 类型变更和 const 冲突
-          $files = Get-ChildItem -Path "flutter/lib" -Filter "*.dart" -Recurse
+          cd flutter
+          flutter pub get
+          
+          # 批量修复 TabBarTheme/DialogTheme 以及非法 const
+          $files = Get-ChildItem -Path "lib" -Filter "*.dart" -Recurse
           foreach ($file in $files) {
               $t = Get-Content $file.FullName -Raw
               $modified = $false
               
-              if ($t -match 'TabbarTheme|DialogTheme') {
-                  $t = $t -replace 'const TabbarTheme\(', 'TabbarTheme(' `
-                          -replace 'const DialogTheme\(', 'DialogTheme(' `
-                          -replace 'TabbarTheme', 'TabBarThemeData' `
-                          -replace 'DialogTheme\(', 'DialogThemeData('
+              if ($t -match 'TabBarTheme|DialogTheme|const\s+TabBarTheme|const\s+DialogTheme') {
+                  # 替换过时的类名并剥离 const
+                  $t = $t -replace 'const\s+TabBarTheme\(', 'TabBarThemeData(' `
+                          -replace 'const\s+DialogTheme\(', 'DialogThemeData(' `
+                          -replace 'TabBarTheme\(', 'TabBarThemeData(' `
+                          -replace 'DialogTheme\(', 'DialogThemeData(' `
+                          -replace 'TabBarTheme', 'TabBarThemeData' `
+                          -replace 'DialogTheme', 'DialogThemeData'
                   $modified = $true
               }
               
+              # 针对 String? 到 String 的空安全强制修复
+              if ($t -match 'String\?') {
+                  $t = $t -replace 'return value;', 'return value ?? "";'
+                  $modified = $true
+              }
+
               if ($modified) {
                   [System.IO.File]::WriteAllText($file.FullName, $t, [System.Text.Encoding]::UTF8)
               }
           }
+          
+          # 重新生成 Dart 端的辅助代码
+          flutter pub run build_runner build --delete-conflicting-outputs
 
-      - name: Run Build
+      - name: Final Build
         shell: powershell
         run: |
-          # 自动获取 Windows SDK 路径以确保 bindgen 能找到头文件
+          # 设置 Windows SDK 环境变量以供 bindgen 使用
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
-          # 执行 RustDesk 核心构建脚本
           python build.py --flutter
           
           cd flutter
-          # 允许空安全非严苛模式构建以处理 String? 类型兼容问题
+          # 使用 --no-tree-shake-icons 减少构建错误，强制非严格空安全
           flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
