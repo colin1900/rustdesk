@@ -59,7 +59,7 @@ jobs:
             --rust-output src/bridge_generated.rs `
             --dart-output flutter/lib/generated_bridge.dart
 
-          # 修复 Rust 符号冲突 (LNK2005)
+          # 修复 Rust 符号重复 (LNK2005)
           $rustBridge = "src/bridge_generated.rs"
           if (Test-Path $rustBridge) {
               $c = Get-Content $rustBridge -Raw
@@ -72,35 +72,43 @@ jobs:
               [System.IO.File]::WriteAllText($rustBridge, $c, [System.Text.Encoding]::UTF8)
           }
 
-      - name: Fix Flutter 3.24 Compatibility (No-Destructive)
+      - name: Patch Flutter UI (Final Compatibility)
         shell: powershell
         run: |
           cd flutter
-          # 1. 注入一个全局 Extension 来修复 ThemeData 缺失成员的问题，而不是改动业务代码
-          $compatFiles = @"
+          
+          # 1. 注入补丁文件：修复 ThemeData 的 Getter 缺失问题
+          $compat = @"
           import 'package:flutter/material.dart';
           extension ThemeDataCompat on ThemeData {
-            // 解决代码中通过 .TabBarThemeData 访问自定义主题的问题
-            dynamic get TabBarThemeData => this.extension<dynamic>(); 
-            dynamic get DialogThemeData => this.extension<dynamic>();
+            dynamic get TabBarThemeData => this.tabBarTheme;
+            dynamic get DialogThemeData => this.dialogTheme;
           }
           "@
-          $compatFiles | Out-File -FilePath "lib/flutter_324_compat.dart" -Encoding UTF8
+          $compat | Out-File -FilePath "lib/flutter_324_compat.dart" -Encoding UTF8
 
-          # 2. 在 main.dart 中引用它
+          # 2. 修正 lib/common.dart 中的构造函数冲突
+          $commonPath = "lib/common.dart"
+          if (Test-Path $commonPath) {
+              $c = Get-Content $commonPath -Raw
+              # 引入补丁并强制替换可能导致“Method not found”的调用
+              $c = "import 'flutter_324_compat.dart';`n" + $c
+              # 这里的正则替换将不确定的 DialogThemeData 访问转为显式的类构造
+              $c = $c -replace 'DialogThemeData\(', 'const DialogThemeData('
+              [System.IO.File]::WriteAllText($commonPath, $c, [System.Text.Encoding]::UTF8)
+          }
+
+          # 3. 全局引入补丁到 main.dart
           $mainFile = "lib/main.dart"
-          $mainContent = Get-Content $mainFile -Raw
-          if ($mainContent -notmatch 'flutter_324_compat.dart') {
-              "import 'flutter_324_compat.dart';`n" + $mainContent | Out-File -FilePath $mainFile -Encoding UTF8
+          if (Test-Path $mainFile) {
+              $mc = Get-Content $mainFile -Raw
+              if ($mc -notmatch 'flutter_324_compat.dart') {
+                  $mc = "import 'flutter_324_compat.dart';`n" + $mc
+                  [System.IO.File]::WriteAllText($mainFile, $mc, [System.Text.Encoding]::UTF8)
+              }
           }
 
-          # 3. 修正 common.dart 等文件中过时的参数名（精准修复）
-          $commonFile = "lib/common.dart"
-          if (Test-Path $commonFile) {
-              (Get-Content $commonFile) -replace 'DialogTheme\(', 'DialogThemeData(' | Out-File $commonFile -Encoding UTF8
-          }
-
-          # 4. 运行 build_runner
+          # 4. 执行 build_runner
           flutter pub run build_runner build --delete-conflicting-outputs
 
       - name: Final Build
@@ -112,7 +120,7 @@ jobs:
           python build.py --flutter
           
           cd flutter
-          # 针对老旧代码，使用最高容忍度编译
+          # 使用 --no-tree-shake-icons 避免某些图标编译错误
           flutter build windows --release --no-tree-shake-icons
 
       - name: Upload Artifact
