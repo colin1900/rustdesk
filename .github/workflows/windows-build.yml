@@ -41,12 +41,12 @@ jobs:
       - name: Prepare Flutter & Dynamic FRB Codegen
         shell: powershell
         run: |
-          # 1. 【关键修复】先执行 pub get，生成 .dart_tool 文件夹
+          # 1. 先同步依赖，生成 .dart_tool 供 ffigen 使用
           cd flutter
           flutter pub get
           cd ..
 
-          # 2. 动态获取版本并安装 codegen
+          # 2. 动态读取版本安装 Codegen
           $pubspec = Get-Content flutter/pubspec.yaml -Raw
           if ($pubspec -match 'flutter_rust_bridge:\s*[\^~]?([0-9\.]+)') {
               $frbVersion = $Matches[1]
@@ -56,13 +56,13 @@ jobs:
               cargo install flutter_rust_bridge_codegen --version 1.80.1
           }
 
-          # 3. 生成桥接代码 (此时 ffigen 应该可以正常运行)
+          # 3. 生成桥接代码
           flutter_rust_bridge_codegen `
             --rust-input src/flutter_ffi.rs `
             --rust-output src/bridge_generated.rs `
             --dart-output flutter/lib/generated_bridge.dart
 
-          # 4. 移除重复符号 (解决 LNK2005)
+          # 4. 修复 Rust 符号冲突 (LNK2005)
           $rustBridge = "src/bridge_generated.rs"
           if (Test-Path $rustBridge) {
               $c = Get-Content $rustBridge -Raw
@@ -75,39 +75,48 @@ jobs:
               [System.IO.File]::WriteAllText($rustBridge, $c, [System.Text.Encoding]::UTF8)
           }
 
-      - name: Patch Flutter UI & Build Runner
+      - name: Patch Flutter UI (Compatibility Fix)
         shell: powershell
         run: |
           cd flutter
-          # 修复 Flutter 3.24 废弃的类名
+          # 仅针对 Flutter 3.24 废弃的 Getter 和非法 const 进行精准修复
           $files = Get-ChildItem -Path "lib" -Filter "*.dart" -Recurse
           foreach ($file in $files) {
               $t = Get-Content $file.FullName -Raw
-              $modified = $false
-              if ($t -match 'TabBarTheme|DialogTheme') {
-                  $t = $t -replace 'const\s+TabBarTheme\(', 'TabBarThemeData(' `
-                          -replace 'const\s+DialogTheme\(', 'DialogThemeData(' `
-                          -replace 'TabBarTheme\(', 'TabBarThemeData(' `
-                          -replace 'DialogTheme\(', 'DialogThemeData(' `
-                          -replace 'TabBarTheme', 'TabBarThemeData' `
-                          -replace 'DialogTheme', 'DialogThemeData'
-                  $modified = $true
+              $orig = $t
+              
+              # 修复 1: 修正对 ThemeData 内部成员的错误访问
+              $t = $t -replace 'Theme.of\(context\).TabBarThemeData', 'Theme.of(context).tabBarTheme' `
+                     -replace 'Theme.of\(context\).DialogThemeData', 'Theme.of(context).dialogTheme'
+              
+              # 修复 2: 移除导致编译错误的非法 const 关键字
+              $t = $t -replace 'const\s+TabBarTheme\(', 'TabBarTheme(' `
+                     -replace 'const\s+DialogTheme\(', 'DialogTheme('
+              
+              # 修复 3: 强制处理简单的 Null Safety 赋值错误 (String? -> String)
+              if ($file.Name -eq "common.dart" -or $file.Name -eq "dialog.dart") {
+                  $t = $t -replace 'return value;', 'return value ?? "";'
               }
-              if ($modified) {
+
+              if ($t -ne $orig) {
                   [System.IO.File]::WriteAllText($file.FullName, $t, [System.Text.Encoding]::UTF8)
               }
           }
-          # 生成最终的 Dart 代码
+          
+          # 重新生成辅助代码
           flutter pub run build_runner build --delete-conflicting-outputs
 
-      - name: Run Build
+      - name: Final Build
         shell: powershell
         run: |
+          # 自动获取最新的 Windows SDK 路径
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
+          # 执行 RustDesk 核心编译
           python build.py --flutter
           
+          # 执行 Flutter Windows 编译
           cd flutter
           flutter build windows --release --no-tree-shake-icons
 
