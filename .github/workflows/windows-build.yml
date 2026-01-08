@@ -41,28 +41,29 @@ jobs:
       - name: Install FRB Codegen
         shell: powershell
         run: |
-          # 动态安装匹配版本的 codegen
+          # 1. 自动检测并安装匹配版本的 codegen
           $pubspec = Get-Content flutter/pubspec.yaml -Raw
           if ($pubspec -match 'flutter_rust_bridge:\s*[\^~]?([0-9\.]+)') {
               $frbVersion = $Matches[1]
-              Write-Host "Installing FRB Codegen version $frbVersion"
+              Write-Host "Detected FRB Version: $frbVersion"
               cargo install flutter_rust_bridge_codegen --version $frbVersion
+          } else {
+              cargo install flutter_rust_bridge_codegen --version 1.80.1
           }
-          # 将 Cargo bin 路径写入 GITHUB_PATH，下一步骤将生效
+          # 2. 将 Cargo 的 bin 目录永久添加到 GitHub PATH
           echo "$env:USERPROFILE\.cargo\bin" >> $env:GITHUB_PATH
 
       - name: Generate Bridge Code
         shell: powershell
         run: |
-          # 1. 准备 Flutter
+          # 此时 PATH 已由上一步刷新
           cd flutter
           flutter pub get
           cd ..
           
-          # 2. 生成桥接代码 (此时 PATH 已刷新)
           flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
 
-          # 3. 修复 LNK2005 符号冲突
+          # 修复 LNK2005 符号冲突
           $rustBridge = "src/bridge_generated.rs"
           if (Test-Path $rustBridge) {
               $c = Get-Content $rustBridge -Raw
@@ -104,9 +105,9 @@ jobs:
           flutter build windows --release --no-tree-shake-icons
           cd ..
 
-          # 准备打包目录
+          # 封包逻辑
           $releaseDir = "flutter/build/windows/x64/runner/Release"
-          $publishDir = "publish"
+          $publishDir = "publish_temp"
           New-Item -ItemType Directory -Force $publishDir
           Copy-Item -Path "$releaseDir/*" -Destination $publishDir -Recurse
 
@@ -121,7 +122,7 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/mcmilk/7-Zip-Scripts/raw/master/RunProgram/x64/7zSD.sfx" -OutFile "7zSD.sfx"
           cmd /c "copy /b 7zSD.sfx + sfx_config.txt + app.7z RustDesk-Portable.exe"
 
-          # 注入图标 (尝试在项目目录中寻找)
+          # 注入图标 (如果源码中有)
           if (Test-Path "res/icon.ico") {
               rcedit "RustDesk-Portable.exe" --set-icon "res/icon.ico"
           }
