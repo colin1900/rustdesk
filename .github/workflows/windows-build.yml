@@ -38,38 +38,38 @@ jobs:
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
-      - name: Generate Bridge Code (Safe Direct Run)
+      - name: Generate Bridge Code (Integrated Step)
         shell: powershell
         run: |
-          # 1. 准备 Flutter 依赖
+          # 1. 自动提取版本并安装
+          $pubspec = Get-Content flutter/pubspec.yaml -Raw
+          $frbVersion = "1.80.1"
+          if ($pubspec -match 'flutter_rust_bridge:\s*[\^~]?([0-9\.]+)') { $frbVersion = $Matches[1] }
+          Write-Host "Installing flutter_rust_bridge_codegen v$frbVersion..."
+          cargo install flutter_rust_bridge_codegen --version $frbVersion
+
+          # 2. 强制将路径刷入当前 Shell 会话，确保下一行能找到命令
+          $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+          
+          # 3. 执行 Flutter 准备和代码生成
           cd flutter
           flutter pub get
           cd ..
-          
-          # 2. 动态确定版本并运行 codegen
-          $pubspec = Get-Content flutter/pubspec.yaml -Raw
-          $frbVersion = "1.80.1" # 兜底版本
-          if ($pubspec -match 'flutter_rust_bridge:\s*[\^~]?([0-9\.]+)') {
-              $frbVersion = $Matches[1]
-          }
-          
-          Write-Host "Running FRB Codegen version $frbVersion via Cargo Run..."
-          # 使用 cargo run 避开安装路径问题，直接调用工具
-          cargo run --package flutter_rust_bridge_codegen --version $frbVersion -- --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
+          flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
 
-          # 3. 修复 LNK2005 符号冲突
+          # 4. 修复符号冲突 (LNK2005) 并处理 Dart_Handle
           $rustBridge = "src/bridge_generated.rs"
           if (Test-Path $rustBridge) {
-              $c = Get-Content $rustBridge -Raw
+              $text = [System.IO.File]::ReadAllText($rustBridge)
               $conflicts = @("store_dart_post_cobject","get_dart_object","drop_dart_object","new_dart_opaque","init_frb_dart_api_dl")
               foreach ($fn in $conflicts) { 
-                  $c = $c -replace "(?s)#\[no_mangle\]\s+pub\s+unsafe\s+extern\s+`"C`"\s+fn\s+$fn\s*\(.*?\)\s*->?\s*.*?\s*\{.*?\}", "/* Removed $fn */" 
+                  $text = $text -replace "(?s)#\[no_mangle\]\s+pub\s+unsafe\s+extern\s+`"C`"\s+fn\s+$fn\s*\(.*?\)\s*->?\s*.*?\s*\{.*?\}", "/* Removed $fn */" 
               }
-              $c = $c -replace 'Dart_Handle', 'isize'
-              [System.IO.File]::WriteAllText($rustBridge, $c, [System.Text.Encoding]::UTF8)
+              $text = $text -replace 'Dart_Handle', 'isize'
+              [System.IO.File]::WriteAllText($rustBridge, $text)
           }
 
-      - name: Patch Flutter UI
+      - name: Patch Flutter UI & Build Runner
         shell: powershell
         run: |
           $flutterDir = "$pwd/flutter"
@@ -87,27 +87,28 @@ jobs:
           cd flutter
           flutter pub run build_runner build --delete-conflicting-outputs
 
-      - name: Build & Extract Portable
+      - name: Build & Package (Portable)
         shell: powershell
         run: |
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
-          # 执行官方构建脚本，它会自动打包单文件
+          # 运行官方构建脚本
           python build.py --flutter
           
-          # 搜索并重命名生成的单文件
+          # 自动寻找生成的单文件产物
           $portable = Get-ChildItem "rustdesk*portable.exe" | Select-Object -First 1
           if ($portable) {
-              Copy-Item $portable.FullName "rustdesk_portable_final.exe"
+              Write-Host "Found portable EXE: $($portable.Name)"
+              Copy-Item $portable.FullName "RustDesk-Portable-Build.exe"
           } else {
-              Write-Error "Portable EXE not found! Files present:"
+              Write-Error "Portable EXE was not generated!"
               ls
               exit 1
           }
 
-      - name: Upload Single EXE
+      - name: Upload Build Result
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Official-Portable
-          path: rustdesk_portable_final.exe
+          name: RustDesk-Windows-Portable
+          path: RustDesk-Portable-Build.exe
