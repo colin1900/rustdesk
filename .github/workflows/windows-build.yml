@@ -44,8 +44,10 @@ jobs:
           $pubspec = Get-Content flutter/pubspec.yaml -Raw
           if ($pubspec -match 'flutter_rust_bridge:\s*[\^~]?([0-9\.]+)') {
               $frbVersion = $Matches[1]
+              Write-Host "Installing FRB Codegen version $frbVersion"
               cargo install flutter_rust_bridge_codegen --version $frbVersion
           }
+          # 依然写入 PATH 作为备份
           echo "$env:USERPROFILE\.cargo\bin" >> $env:GITHUB_PATH
 
       - name: Generate Bridge Code
@@ -54,14 +56,19 @@ jobs:
           cd flutter
           flutter pub get
           cd ..
-          flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
           
-          # 修复符号冲突
+          # 使用绝对路径调用，防止 PATH 刷新延迟
+          $codegen = "$env:USERPROFILE\.cargo\bin\flutter_rust_bridge_codegen.exe"
+          & $codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
+
+          # 修复 LNK2005 符号冲突
           $rustBridge = "src/bridge_generated.rs"
           if (Test-Path $rustBridge) {
               $c = Get-Content $rustBridge -Raw
               $conflicts = @("store_dart_post_cobject","get_dart_object","drop_dart_object","new_dart_opaque","init_frb_dart_api_dl")
-              foreach ($fn in $conflicts) { $c = $c -replace "(?s)#\[no_mangle\]\s+pub\s+unsafe\s+extern\s+`"C`"\s+fn\s+$fn\s*\(.*?\)\s*->?\s*.*?\s*\{.*?\}", "/* Removed $fn */" }
+              foreach ($fn in $conflicts) { 
+                  $c = $c -replace "(?s)#\[no_mangle\]\s+pub\s+unsafe\s+extern\s+`"C`"\s+fn\s+$fn\s*\(.*?\)\s*->?\s*.*?\s*\{.*?\}", "/* Removed $fn */" 
+              }
               $c = $c -replace 'Dart_Handle', 'isize'
               [System.IO.File]::WriteAllText($rustBridge, $c, [System.Text.Encoding]::UTF8)
           }
@@ -72,6 +79,7 @@ jobs:
           $flutterDir = "$pwd/flutter"
           $compat = "import 'package:flutter/material.dart';`nextension ThemeDataCompat on ThemeData { dynamic get TabBarThemeData => this.tabBarTheme; dynamic get DialogThemeData => this.dialogTheme; }"
           $compat | Out-File -FilePath "$flutterDir/lib/flutter_324_compat.dart" -Encoding UTF8
+          
           foreach ($file in @("lib/common.dart", "lib/main.dart")) {
               $path = Join-Path $flutterDir $file
               if (Test-Path $path) {
@@ -83,21 +91,27 @@ jobs:
           cd flutter
           flutter pub run build_runner build --delete-conflicting-outputs
 
-      - name: Final Build & Extract Portable
+      - name: Build & Extract Portable
         shell: powershell
         run: |
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
-          # 运行官方构建脚本，它会自动调用官方 Packer
+          # 这一步会编译并自动触发官方的 rustdesk-portable-packer
           python build.py --flutter
           
-          # 检查生成结果
+          # 校验产物
           if (Test-Path "rustdesk_portable.exe") {
               Write-Host "Success! Official Portable EXE found."
           } else {
-              Write-Error "Portable EXE not found! Check build logs."
-              exit 1
+              # 有时 Packer 输出的文件名可能包含版本号，做个通配符查找
+              $portable = Get-ChildItem "rustdesk*portable.exe" | Select-Object -First 1
+              if ($portable) {
+                  Move-Item $portable.FullName "rustdesk_portable.exe"
+              } else {
+                  Write-Error "Portable EXE not found!"
+                  exit 1
+              }
           }
 
       - name: Upload Single EXE
