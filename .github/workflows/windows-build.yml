@@ -48,10 +48,10 @@ jobs:
           Write-Host "Installing flutter_rust_bridge_codegen v$frbVersion..."
           cargo install flutter_rust_bridge_codegen --version $frbVersion
 
-          # 2. 强制将路径刷入当前 Shell 会话
+          # 2. 强制刷入路径
           $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
           
-          # 3. 执行 Flutter 准备和代码生成
+          # 3. 执行准备和生成
           cd flutter
           flutter pub get
           cd ..
@@ -93,26 +93,30 @@ jobs:
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
-          # 1. 运行官方构建脚本
+          # 1. 运行构建
           python build.py --flutter
           
-          # 2. 检查各种可能的生成文件名
-          Write-Host "Searching for generated portable EXE..."
-          $files = Get-ChildItem -Path . -Filter "rustdesk*portable.exe"
-          if ($files) {
-              $targetFile = $files[0].FullName
-              Write-Host "Found: $($files[0].Name)"
-              Copy-Item $targetFile "RustDesk-Portable-Final.exe"
-          } elseif (Test-Path "rustdesk_portable.exe") {
-              Copy-Item "rustdesk_portable.exe" "RustDesk-Portable-Final.exe"
+          # 2. 强力捕获文件
+          Write-Host "Verifying output..."
+          $outPath = Join-Path $pwd "rustdesk_portable.exe"
+          if (Test-Path $outPath) {
+              Copy-Item $outPath "RustDesk-Portable.exe"
+              Write-Host "Captured: RustDesk-Portable.exe"
           } else {
-              Write-Error "Portable EXE was not found! Listing files for debug:"
-              ls *.exe
-              exit 1
+              # 兜底：搜索当前目录下所有生成的 exe
+              $found = Get-ChildItem -Filter "rustdesk*portable.exe" | Select-Object -First 1
+              if ($found) {
+                  Copy-Item $found.FullName "RustDesk-Portable.exe"
+                  Write-Host "Captured via search: $($found.Name)"
+              } else {
+                  Write-Error "Could not locate the portable EXE."
+                  ls *.exe
+                  exit 1
+              }
           }
 
-      - name: Upload Build Result
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: RustDesk-Windows-Portable
-          path: RustDesk-Portable-Final.exe
+          path: RustDesk-Portable.exe
