@@ -95,7 +95,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       if (!isOutgoingOnly) buildPasswordBoard(context),
       FutureBuilder<Widget>(
         future: Future.value(
-            Obx(() => buildHelpCards(stateGlobal.updateUrl.value))),
+            //Obx(() => buildHelpCards(stateGlobal.updateUrl.value))),
+        const SizedBox.shrink()),
         builder: (_, data) {
           if (data.hasData) {
             if (isIncomingOnly) {
@@ -147,7 +148,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                 Expanded(child: Container())
               ],
             ),
-            if (isOutgoingOnly)
+            if (false && isOutgoingOnly)
               Positioned(
                 bottom: 6,
                 left: 12,
@@ -254,7 +255,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       ),
     );
   }
-
+//隐藏设置
+/*
   Widget buildPopupMenu(BuildContext context) {
     final textColor = Theme.of(context).textTheme.titleLarge?.color;
     RxBool hover = false.obs;
@@ -279,7 +281,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       onHover: (value) => hover.value = value,
     );
   }
-
+*/
+//
   buildPasswordBoard(BuildContext context) {
     return ChangeNotifierProvider.value(
         value: gFFI.serverModel,
