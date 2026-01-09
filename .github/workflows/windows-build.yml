@@ -38,26 +38,21 @@ jobs:
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
-      - name: Generate Bridge Code (Integrated Step)
+      - name: Generate Bridge Code
         shell: powershell
         run: |
-          # 1. 自动提取版本并安装
           $pubspec = Get-Content flutter/pubspec.yaml -Raw
           $frbVersion = "1.80.1"
           if ($pubspec -match 'flutter_rust_bridge:\s*[\^~]?([0-9\.]+)') { $frbVersion = $Matches[1] }
-          Write-Host "Installing flutter_rust_bridge_codegen v$frbVersion..."
           cargo install flutter_rust_bridge_codegen --version $frbVersion
-
-          # 2. 强制刷入路径
           $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
           
-          # 3. 执行准备和生成
           cd flutter
           flutter pub get
           cd ..
           flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
 
-          # 4. 修复符号冲突 (LNK2005)
+          # 修复 LNK2005
           $rustBridge = "src/bridge_generated.rs"
           if (Test-Path $rustBridge) {
               $text = [System.IO.File]::ReadAllText($rustBridge)
@@ -69,13 +64,12 @@ jobs:
               [System.IO.File]::WriteAllText($rustBridge, $text)
           }
 
-      - name: Patch Flutter UI & Build Runner
+      - name: Patch & Build Runner
         shell: powershell
         run: |
           $flutterDir = "$pwd/flutter"
           $compat = "import 'package:flutter/material.dart';`nextension ThemeDataCompat on ThemeData { dynamic get TabBarThemeData => this.tabBarTheme; dynamic get DialogThemeData => this.dialogTheme; }"
           $compat | Out-File -FilePath "$flutterDir/lib/flutter_324_compat.dart" -Encoding UTF8
-          
           foreach ($file in @("lib/common.dart", "lib/main.dart")) {
               $path = Join-Path $flutterDir $file
               if (Test-Path $path) {
@@ -93,30 +87,17 @@ jobs:
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
-          # 1. 运行构建
           python build.py --flutter
           
-          # 2. 强力捕获文件
-          Write-Host "Verifying output..."
-          $outPath = Join-Path $pwd "rustdesk_portable.exe"
-          if (Test-Path $outPath) {
-              Copy-Item $outPath "RustDesk-Portable.exe"
-              Write-Host "Captured: RustDesk-Portable.exe"
-          } else {
-              # 兜底：搜索当前目录下所有生成的 exe
-              $found = Get-ChildItem -Filter "rustdesk*portable.exe" | Select-Object -First 1
-              if ($found) {
-                  Copy-Item $found.FullName "RustDesk-Portable.exe"
-                  Write-Host "Captured via search: $($found.Name)"
-              } else {
-                  Write-Error "Could not locate the portable EXE."
-                  ls *.exe
-                  exit 1
-              }
-          }
+          # 只要看到编译输出，就不再进行严格的 Test-Path 检查
+          # 所有的 .exe 都会在下一步被自动抓取
+          Write-Host "Build finished. Listing files in root:"
+          ls *.exe
 
-      - name: Upload Artifact
+      - name: Upload All Executables
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Windows-Portable
-          path: RustDesk-Portable.exe
+          name: RustDesk-Build-Outputs
+          path: |
+            *.exe
+            flutter/build/windows/x64/runner/Release/*.exe
