@@ -28,7 +28,7 @@ jobs:
 
       - name: Install Build Tools
         run: |
-          choco install llvm nasm ninja 7zip rcedit -y
+          choco install llvm nasm ninja rcedit -y
           pip install requests
 
       - name: Setup VCPKG
@@ -41,36 +41,27 @@ jobs:
       - name: Install FRB Codegen
         shell: powershell
         run: |
-          # 1. 自动检测并安装匹配版本的 codegen
           $pubspec = Get-Content flutter/pubspec.yaml -Raw
           if ($pubspec -match 'flutter_rust_bridge:\s*[\^~]?([0-9\.]+)') {
               $frbVersion = $Matches[1]
-              Write-Host "Detected FRB Version: $frbVersion"
               cargo install flutter_rust_bridge_codegen --version $frbVersion
-          } else {
-              cargo install flutter_rust_bridge_codegen --version 1.80.1
           }
-          # 2. 将 Cargo 的 bin 目录永久添加到 GitHub PATH
           echo "$env:USERPROFILE\.cargo\bin" >> $env:GITHUB_PATH
 
       - name: Generate Bridge Code
         shell: powershell
         run: |
-          # 此时 PATH 已由上一步刷新
           cd flutter
           flutter pub get
           cd ..
-          
           flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
-
-          # 修复 LNK2005 符号冲突
+          
+          # 修复符号冲突
           $rustBridge = "src/bridge_generated.rs"
           if (Test-Path $rustBridge) {
               $c = Get-Content $rustBridge -Raw
               $conflicts = @("store_dart_post_cobject","get_dart_object","drop_dart_object","new_dart_opaque","init_frb_dart_api_dl")
-              foreach ($fn in $conflicts) { 
-                  $c = $c -replace "(?s)#\[no_mangle\]\s+pub\s+unsafe\s+extern\s+`"C`"\s+fn\s+$fn\s*\(.*?\)\s*->?\s*.*?\s*\{.*?\}", "/* Removed $fn */" 
-              }
+              foreach ($fn in $conflicts) { $c = $c -replace "(?s)#\[no_mangle\]\s+pub\s+unsafe\s+extern\s+`"C`"\s+fn\s+$fn\s*\(.*?\)\s*->?\s*.*?\s*\{.*?\}", "/* Removed $fn */" }
               $c = $c -replace 'Dart_Handle', 'isize'
               [System.IO.File]::WriteAllText($rustBridge, $c, [System.Text.Encoding]::UTF8)
           }
@@ -81,7 +72,6 @@ jobs:
           $flutterDir = "$pwd/flutter"
           $compat = "import 'package:flutter/material.dart';`nextension ThemeDataCompat on ThemeData { dynamic get TabBarThemeData => this.tabBarTheme; dynamic get DialogThemeData => this.dialogTheme; }"
           $compat | Out-File -FilePath "$flutterDir/lib/flutter_324_compat.dart" -Encoding UTF8
-          
           foreach ($file in @("lib/common.dart", "lib/main.dart")) {
               $path = Join-Path $flutterDir $file
               if (Test-Path $path) {
@@ -93,42 +83,25 @@ jobs:
           cd flutter
           flutter pub run build_runner build --delete-conflicting-outputs
 
-      - name: Build & Package Single EXE
+      - name: Final Build & Extract Portable
         shell: powershell
         run: |
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
+          # 运行官方构建脚本，它会自动调用官方 Packer
           python build.py --flutter
           
-          cd flutter
-          flutter build windows --release --no-tree-shake-icons
-          cd ..
-
-          # 封包逻辑
-          $releaseDir = "flutter/build/windows/x64/runner/Release"
-          $publishDir = "publish_temp"
-          New-Item -ItemType Directory -Force $publishDir
-          Copy-Item -Path "$releaseDir/*" -Destination $publishDir -Recurse
-
-          # 创建 7z 启动配置
-          $sfxConfig = ";!@Install@!UTF-8!`nTitle=`"RustDesk Portable`"`nRunProgram=`"rustdesk.exe`"`n;!@InstallEnd@!"
-          $sfxConfig | Out-File -FilePath "sfx_config.txt" -Encoding UTF8
-
-          # 压缩
-          & "7z" a "app.7z" "./$publishDir/*"
-
-          # 封包为单文件
-          Invoke-WebRequest -Uri "https://github.com/mcmilk/7-Zip-Scripts/raw/master/RunProgram/x64/7zSD.sfx" -OutFile "7zSD.sfx"
-          cmd /c "copy /b 7zSD.sfx + sfx_config.txt + app.7z RustDesk-Portable.exe"
-
-          # 注入图标 (如果源码中有)
-          if (Test-Path "res/icon.ico") {
-              rcedit "RustDesk-Portable.exe" --set-icon "res/icon.ico"
+          # 检查生成结果
+          if (Test-Path "rustdesk_portable.exe") {
+              Write-Host "Success! Official Portable EXE found."
+          } else {
+              Write-Error "Portable EXE not found! Check build logs."
+              exit 1
           }
 
       - name: Upload Single EXE
         uses: actions/upload-artifact@v4
         with:
-          name: RustDesk-Portable-Single-EXE
-          path: RustDesk-Portable.exe
+          name: RustDesk-Official-Portable
+          path: rustdesk_portable.exe
