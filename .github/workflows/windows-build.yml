@@ -48,7 +48,7 @@ jobs:
           Write-Host "Installing flutter_rust_bridge_codegen v$frbVersion..."
           cargo install flutter_rust_bridge_codegen --version $frbVersion
 
-          # 2. 强制将路径刷入当前 Shell 会话，确保下一行能找到命令
+          # 2. 强制将路径刷入当前 Shell 会话
           $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
           
           # 3. 执行 Flutter 准备和代码生成
@@ -57,7 +57,7 @@ jobs:
           cd ..
           flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
 
-          # 4. 修复符号冲突 (LNK2005) 并处理 Dart_Handle
+          # 4. 修复符号冲突 (LNK2005)
           $rustBridge = "src/bridge_generated.rs"
           if (Test-Path $rustBridge) {
               $text = [System.IO.File]::ReadAllText($rustBridge)
@@ -93,17 +93,21 @@ jobs:
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
-          # 运行官方构建脚本
+          # 1. 运行官方构建脚本
           python build.py --flutter
           
-          # 自动寻找生成的单文件产物
-          $portable = Get-ChildItem "rustdesk*portable.exe" | Select-Object -First 1
-          if ($portable) {
-              Write-Host "Found portable EXE: $($portable.Name)"
-              Copy-Item $portable.FullName "RustDesk-Portable-Build.exe"
+          # 2. 检查各种可能的生成文件名
+          Write-Host "Searching for generated portable EXE..."
+          $files = Get-ChildItem -Path . -Filter "rustdesk*portable.exe"
+          if ($files) {
+              $targetFile = $files[0].FullName
+              Write-Host "Found: $($files[0].Name)"
+              Copy-Item $targetFile "RustDesk-Portable-Final.exe"
+          } elseif (Test-Path "rustdesk_portable.exe") {
+              Copy-Item "rustdesk_portable.exe" "RustDesk-Portable-Final.exe"
           } else {
-              Write-Error "Portable EXE was not generated!"
-              ls
+              Write-Error "Portable EXE was not found! Listing files for debug:"
+              ls *.exe
               exit 1
           }
 
@@ -111,4 +115,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RustDesk-Windows-Portable
-          path: RustDesk-Portable-Build.exe
+          path: RustDesk-Portable-Final.exe
