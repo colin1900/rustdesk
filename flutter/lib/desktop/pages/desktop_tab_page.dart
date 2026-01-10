@@ -96,6 +96,7 @@ class _DesktopTabPageState extends State<DesktopTabPage> {
             backgroundColor: Theme.of(context).colorScheme.background,
             body: DesktopTab(
               controller: tabController,
+               /*               
               tail: Offstage(
                 offstage: bind.isIncomingOnly() || bind.isDisableSettings(),
                 child: ActionIcon(
@@ -105,6 +106,8 @@ class _DesktopTabPageState extends State<DesktopTabPage> {
                   isClose: false,
                 ),
               ),
+              */
+              tail: const SizedBox.shrink(),
             )));
     return isMacOS || kUseCompatibleUiMode
         ? tabWidget
