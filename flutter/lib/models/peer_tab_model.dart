@@ -14,8 +14,8 @@ enum PeerTabIndex {
   recent,
   fav,
   lan,
- // ab,
- // group,
+  ab,
+  group,
 }
 
 class PeerTabModel with ChangeNotifier {
