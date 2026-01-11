@@ -53,6 +53,7 @@ class _PeerTabPageState extends State<PeerTabPage>
     _TabEntry(DiscoveredPeersView(
       menuPadding: _menuPadding(),
     )),
+      /*
     _TabEntry(
         AddressBook(
           menuPadding: _menuPadding(),
@@ -66,6 +67,7 @@ class _PeerTabPageState extends State<PeerTabPage>
       ),
       ({dynamic hint}) => gFFI.groupModel.pull(force: hint == null),
     ),
+    */
   ];
   RelativeRect? mobileTabContextMenuPos;
 
