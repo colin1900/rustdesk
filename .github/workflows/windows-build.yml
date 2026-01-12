@@ -17,6 +17,26 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 0
 
+      # --- 新增步骤：强制同步并更新你的 hbb_common 仓库 ---
+      - name: Sync & Force Update Submodule
+        shell: powershell
+        run: |
+          Write-Host "Setting submodule URL to colin1900/hbb_common..."
+          git submodule set-url libs/hbb_common https://github.com/colin1900/hbb_common.git
+          git submodule sync
+          
+          Write-Host "Forcing update to latest remote commit..."
+          # --remote 会强制拉取你仓库 main 分支的最新提交，而不是主仓库记录的旧 ID
+          git submodule update --init --recursive --remote --force
+          
+          Write-Host "Verification: Checking server address in config.rs..."
+          $configPath = "libs/hbb_common/src/config.rs"
+          if (Test-Path $configPath) {
+              # 在日志中打印包含 rendezvous_server 的行，方便你检查是否改成了你的地址
+              Get-Content $configPath | Select-String "rendezvous_server" | Select-Object -First 3
+          }
+      # -----------------------------------------------
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -120,7 +140,7 @@ jobs:
           body: |
             Automated Build for RustDesk Windows Portable.
             Version: 1.4.4 (Flutter 3.24)
-            Date: ${{ env.GITHUB_ENV }}
+            Submodule: colin1900/hbb_common
           draft: false
           prerelease: false
         env:
