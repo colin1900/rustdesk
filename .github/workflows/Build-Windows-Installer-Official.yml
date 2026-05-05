@@ -45,7 +45,7 @@ jobs:
         with:
           flutter-version: '3.24.0'
 
-      # 注意：这里确保安装了 nsis，这是打包成安装版的关键工具
+      # 确保安装了 nsis
       - name: Install Build Tools
         run: |
           choco install llvm nasm ninja rcedit nsis -y
@@ -72,7 +72,7 @@ jobs:
           cd ..
           flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
 
-          # 修复 LNK2005 重复符号冲突
+          # 修复 LNK2005
           $rustBridge = "src/bridge_generated.rs"
           if (Test-Path $rustBridge) {
               $text = [System.IO.File]::ReadAllText($rustBridge)
@@ -93,14 +93,13 @@ jobs:
           $mainDart = "$flutterDir/lib/main.dart"
           if (Test-Path $mainDart) {
               $c = [System.IO.File]::ReadAllText($mainDart)
-              # 精准匹配并替换 offstage 逻辑为 true
               $c = $c -replace 'offstage:\s+!\(!_svcStopped\.value\s+&&\s+stateGlobal\.svcStatus\.value\s+==\s+SvcStatus\.ready\s+&&\s+_svcIsUsingPublicServer\.value\)', 'offstage: true'
               [System.IO.File]::WriteAllText($mainDart, $c, [System.Text.Encoding]::UTF8)
               Write-Host "Success: Hardcoded 'setup_server_tip' to be hidden in UI."
           }
 
-          # 2. 修复 Flutter 3.24 兼容性
-          $compat = "import 'package:package:flutter/material.dart';`nextension ThemeDataCompat on ThemeData { dynamic get TabBarThemeData => this.tabBarTheme; dynamic get DialogThemeData => this.dialogTheme; }"
+          # 2. 修复 Flutter 3.24 兼容性 (已修复多余的 package: 拼写错误)
+          $compat = "import 'package:flutter/material.dart';`nextension ThemeDataCompat on ThemeData { dynamic get TabBarThemeData => this.tabBarTheme; dynamic get DialogThemeData => this.dialogTheme; }"
           $compat | Out-File -FilePath "$flutterDir/lib/flutter_324_compat.dart" -Encoding UTF8
           foreach ($file in @("lib/common.dart", "lib/main.dart")) {
               $path = Join-Path $flutterDir $file
@@ -120,10 +119,9 @@ jobs:
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
-          # 执行官方构建脚本 (这会生成基础 exe 并调用 NSIS 打包成安装包)
+          # 执行官方构建脚本
           python build.py --flutter
           
-          # 明确指定只获取文件名带有 -install 的安装包，抛弃 portable 版本
           $installerExe = Get-ChildItem "rustdesk-*-install.exe" | Select-Object -First 1
           
           if ($installerExe) {
@@ -137,14 +135,14 @@ jobs:
               exit 1
           }
 
-      # --- 上传 Artifacts 供网页底部直接下载 ---
+      # --- 上传 Artifacts ---
       - name: Upload Installer Artifact
         uses: actions/upload-artifact@v4
         with:
           name: RustDesk-Custom-Installer
           path: ${{ env.INSTALLER_NAME }}
 
-      # --- 如果是手动触发或打 Tag，同步发布到 Releases ---
+      # --- 同步发布到 Releases ---
       - name: Release to GitHub
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
@@ -154,10 +152,10 @@ jobs:
           name: RustDesk Custom Installer #${{ github.run_number }}
           body: |
             Automated Build for RustDesk Windows Custom Installer.
-            - **纯安装版**: 以系统服务级别运行，彻底解决远控时 UAC 提权导致的无法操作/黑屏问题。
+            - **纯安装版**: 以系统服务级别运行。
             - **极简界面**: 已彻底去除 UI 底部的“自建服务器提示”。
-            - **私有化网络**: 核心通讯底层（hbb_common）已指向您的专属内网服务器。
-            - **静默部署**: 支持命令行加 `/S` 参数进行无人值守静默安装。
+            - **私有化网络**: 核心通讯底层指向内网。
+            - **静默部署**: 支持命令行加 `/S` 参数。
           draft: false
           prerelease: false
         env:
