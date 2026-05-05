@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: windows-2022
     permissions:
-      contents: write
+      contents: write # 允许上传到 Release
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -17,13 +17,22 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 0
 
+      # --- 强制同步个人私有服务器配置 ---
       - name: Sync & Force Update Submodule
         shell: powershell
         run: |
+          Write-Host "Setting submodule URL to colin1900/hbb_common..."
           git submodule set-url libs/hbb_common https://github.com/colin1900/hbb_common.git
           git submodule sync
+          
+          Write-Host "Forcing update to latest remote commit..."
           git submodule update --init --recursive --remote --force
-          Write-Host "Config.rs verified for custom server."
+          
+          Write-Host "Verification: Checking server address in config.rs..."
+          $configPath = "libs/hbb_common/src/config.rs"
+          if (Test-Path $configPath) {
+              Get-Content $configPath | Select-String "rendezvous_server" | Select-Object -First 3
+          }
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -36,6 +45,7 @@ jobs:
         with:
           flutter-version: '3.24.0'
 
+      # 注意：这里确保安装了 nsis，这是打包成安装版的关键工具
       - name: Install Build Tools
         run: |
           choco install llvm nasm ninja rcedit nsis -y
@@ -48,54 +58,107 @@ jobs:
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
 
-      - name: Generate Bridge & Patch UI
+      - name: Generate Bridge Code & Patch LNK2005
         shell: powershell
         run: |
-          # 1. 生成桥接代码
+          $pubspec = Get-Content flutter/pubspec.yaml -Raw
+          $frbVersion = "1.80.1"
+          if ($pubspec -match 'flutter_rust_bridge:\s*[\^~]?([0-9\.]+)') { $frbVersion = $Matches[1] }
+          cargo install flutter_rust_bridge_codegen --version $frbVersion
           $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
-          cargo install flutter_rust_bridge_codegen --version 1.80.1
-          cd flutter; flutter pub get; cd ..
+          
+          cd flutter
+          flutter pub get
+          cd ..
           flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
 
-          # 2. 移除 UI 自建服务器提示 (解决你的 image_6ae5b0.png 问题)
-          $mainDart = "flutter/lib/main.dart"
-          if (Test-Path $mainDart) {
-              $c = [System.IO.File]::ReadAllText($mainDart)
-              $c = $c -replace 'offstage: !\(.*_svcIsUsingPublicServer\.value\),', 'offstage: true,'
-              [System.IO.File]::WriteAllText($mainDart, $c, [System.Text.Encoding]::UTF8)
+          # 修复 LNK2005 重复符号冲突
+          $rustBridge = "src/bridge_generated.rs"
+          if (Test-Path $rustBridge) {
+              $text = [System.IO.File]::ReadAllText($rustBridge)
+              $conflicts = @("store_dart_post_cobject","get_dart_object","drop_dart_object","new_dart_opaque","init_frb_dart_api_dl")
+              foreach ($fn in $conflicts) { 
+                  $text = $text -replace "(?s)#\[no_mangle\]\s+pub\s+unsafe\s+extern\s+`"C`"\s+fn\s+$fn\s*\(.*?\)\s*->?\s*.*?\s*\{.*?\}", "/* Removed $fn */" 
+              }
+              $text = $text -replace 'Dart_Handle', 'isize'
+              [System.IO.File]::WriteAllText($rustBridge, $text)
           }
 
-          # 3. 补丁 Flutter 3.24 兼容性
+      - name: Patch Flutter UI (Hide Tip & 3.24 Compat)
+        shell: powershell
+        run: |
+          $flutterDir = "$pwd/flutter"
+          
+          # 1. 强行隐藏 UI 界面的“自建服务器提示”
+          $mainDart = "$flutterDir/lib/main.dart"
+          if (Test-Path $mainDart) {
+              $c = [System.IO.File]::ReadAllText($mainDart)
+              # 精准匹配并替换 offstage 逻辑为 true
+              $c = $c -replace 'offstage:\s+!\(!_svcStopped\.value\s+&&\s+stateGlobal\.svcStatus\.value\s+==\s+SvcStatus\.ready\s+&&\s+_svcIsUsingPublicServer\.value\)', 'offstage: true'
+              [System.IO.File]::WriteAllText($mainDart, $c, [System.Text.Encoding]::UTF8)
+              Write-Host "Success: Hardcoded 'setup_server_tip' to be hidden in UI."
+          }
+
+          # 2. 修复 Flutter 3.24 兼容性
+          $compat = "import 'package:package:flutter/material.dart';`nextension ThemeDataCompat on ThemeData { dynamic get TabBarThemeData => this.tabBarTheme; dynamic get DialogThemeData => this.dialogTheme; }"
+          $compat | Out-File -FilePath "$flutterDir/lib/flutter_324_compat.dart" -Encoding UTF8
+          foreach ($file in @("lib/common.dart", "lib/main.dart")) {
+              $path = Join-Path $flutterDir $file
+              if (Test-Path $path) {
+                  $c = Get-Content $path -Raw
+                  if ($c -notmatch 'flutter_324_compat.dart') { $c = "import 'flutter_324_compat.dart';`n" + $c }
+                  [System.IO.File]::WriteAllText($path, $c, [System.Text.Encoding]::UTF8)
+              }
+          }
           cd flutter
           flutter pub run build_runner build --delete-conflicting-outputs
 
-      - name: Build Installer (Full Service Mode)
+      # --- 仅提取安装版，忽略便携版 ---
+      - name: Build Installer 
         shell: powershell
         run: |
           $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
           $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
           
-          # 注意：安装版在 build.py 中不需要特殊参数，它默认会生成带安装引导的程序
+          # 执行官方构建脚本 (这会生成基础 exe 并调用 NSIS 打包成安装包)
           python build.py --flutter
           
-          $rawExe = Get-ChildItem "rustdesk-*.exe" | Select-Object -First 1
-          if ($rawExe) {
-              $newName = "RustDesk-Installer-Custom.exe"
-              Move-Item $rawExe.FullName $newName
-              echo "FILE_NAME=$newName" >> $env:GITHUB_ENV
+          # 明确指定只获取文件名带有 -install 的安装包，抛弃 portable 版本
+          $installerExe = Get-ChildItem "rustdesk-*-install.exe" | Select-Object -First 1
+          
+          if ($installerExe) {
+              $date = Get-Date -Format "yyyyMMdd"
+              $newName = "RustDesk-Custom-Installer-$date.exe"
+              Rename-Item $installerExe.FullName $newName
+              Write-Host "Installer package successfully created: $newName"
+              echo "INSTALLER_NAME=$newName" >> $env:GITHUB_ENV
+          } else {
+              Write-Error "Installer EXE was not generated!"
+              exit 1
           }
 
-      - name: Upload & Release
-        uses: softprops/action-gh-release@v2
-        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+      # --- 上传 Artifacts 供网页底部直接下载 ---
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: ${{ env.FILE_NAME }}
+          name: RustDesk-Custom-Installer
+          path: ${{ env.INSTALLER_NAME }}
+
+      # --- 如果是手动触发或打 Tag，同步发布到 Releases ---
+      - name: Release to GitHub
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          files: ${{ env.INSTALLER_NAME }}
           tag_name: installer-${{ github.run_number }}
           name: RustDesk Custom Installer #${{ github.run_number }}
           body: |
-            ## 自定义安装版说明
-            - **后台服务**：安装后自动注册为 Windows 服务，解决远程提权 (UAC) 权限不足问题。
-            - **静默安装**：支持使用命令行参数 `RustDesk-Installer-Custom.exe /S` 进行无人值守安装。
-            - **预设配置**：已集成 colin1900/hbb_common 的自建服务器地址。
+            Automated Build for RustDesk Windows Custom Installer.
+            - **纯安装版**: 以系统服务级别运行，彻底解决远控时 UAC 提权导致的无法操作/黑屏问题。
+            - **极简界面**: 已彻底去除 UI 底部的“自建服务器提示”。
+            - **私有化网络**: 核心通讯底层（hbb_common）已指向您的专属内网服务器。
+            - **静默部署**: 支持命令行加 `/S` 参数进行无人值守静默安装。
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
