@@ -1,0 +1,101 @@
+name: Build-Windows-Installer-Official
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0
+
+      - name: Sync & Force Update Submodule
+        shell: powershell
+        run: |
+          git submodule set-url libs/hbb_common https://github.com/colin1900/hbb_common.git
+          git submodule sync
+          git submodule update --init --recursive --remote --force
+          Write-Host "Config.rs verified for custom server."
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+
+      - name: Install Build Tools
+        run: |
+          choco install llvm nasm ninja rcedit nsis -y
+          pip install requests
+
+      - name: Setup VCPKG
+        shell: powershell
+        run: |
+          & C:\vcpkg\vcpkg.exe install ffmpeg[avcodec,avformat,swresample,swscale] libvpx libyuv opus aom --triplet x64-windows-static --classic
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
+
+      - name: Generate Bridge & Patch UI
+        shell: powershell
+        run: |
+          # 1. 生成桥接代码
+          $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+          cargo install flutter_rust_bridge_codegen --version 1.80.1
+          cd flutter; flutter pub get; cd ..
+          flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs --rust-output src/bridge_generated.rs --dart-output flutter/lib/generated_bridge.dart
+
+          # 2. 移除 UI 自建服务器提示 (解决你的 image_6ae5b0.png 问题)
+          $mainDart = "flutter/lib/main.dart"
+          if (Test-Path $mainDart) {
+              $c = [System.IO.File]::ReadAllText($mainDart)
+              $c = $c -replace 'offstage: !\(.*_svcIsUsingPublicServer\.value\),', 'offstage: true,'
+              [System.IO.File]::WriteAllText($mainDart, $c, [System.Text.Encoding]::UTF8)
+          }
+
+          # 3. 补丁 Flutter 3.24 兼容性
+          cd flutter
+          flutter pub run build_runner build --delete-conflicting-outputs
+
+      - name: Build Installer (Full Service Mode)
+        shell: powershell
+        run: |
+          $sdkVer = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\10.*" | Sort-Object Name -Descending | Select-Object -First 1).Name
+          $env:BINDGEN_EXTRA_CLANG_ARGS = "-I`"C:\Program Files (x86)\Windows Kits\10\Include\$sdkVer\ucrt`" -I`"C:\vcpkg\installed\x64-windows-static\include`""
+          
+          # 注意：安装版在 build.py 中不需要特殊参数，它默认会生成带安装引导的程序
+          python build.py --flutter
+          
+          $rawExe = Get-ChildItem "rustdesk-*.exe" | Select-Object -First 1
+          if ($rawExe) {
+              $newName = "RustDesk-Installer-Custom.exe"
+              Move-Item $rawExe.FullName $newName
+              echo "FILE_NAME=$newName" >> $env:GITHUB_ENV
+          }
+
+      - name: Upload & Release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ env.FILE_NAME }}
+          tag_name: installer-${{ github.run_number }}
+          name: RustDesk Custom Installer #${{ github.run_number }}
+          body: |
+            ## 自定义安装版说明
+            - **后台服务**：安装后自动注册为 Windows 服务，解决远程提权 (UAC) 权限不足问题。
+            - **静默安装**：支持使用命令行参数 `RustDesk-Installer-Custom.exe /S` 进行无人值守安装。
+            - **预设配置**：已集成 colin1900/hbb_common 的自建服务器地址。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
